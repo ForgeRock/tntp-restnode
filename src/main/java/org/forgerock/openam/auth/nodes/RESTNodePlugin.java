@@ -53,6 +53,12 @@ public class RESTNodePlugin extends AbstractNodeAmPlugin {
             pluginTools.registerAuthNode(nodeClass);
         }
     }
+    
+     @Override
+    public void upgrade(String fromVersion) throws PluginException {
+        pluginTools.upgradeAuthNode(RESTNodePlugin.class);
+        super.upgrade(fromVersion);
+    }
 
     @Override
     protected Iterable<? extends Class<? extends Node>> getNodes() {
