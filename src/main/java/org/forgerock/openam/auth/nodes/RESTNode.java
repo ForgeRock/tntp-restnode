@@ -301,7 +301,7 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-    public HttpClient getmTLShttpClient(Config config, TreeContext context,) {
+    public HttpClient getmTLShttpClient(Config config, TreeContext context) {
 
         KeyManager[] keyManager = null;
         TrustManager[] trustManager = null;
