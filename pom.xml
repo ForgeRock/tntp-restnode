@@ -1,19 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
- * The contents of this file are subject to the terms of the Common Development and
- * Distribution License (the License). You may not use this file except in compliance with the
- * License.
+ * This code is to be used exclusively in connection with ForgeRock’s software or services.
+ * ForgeRock only offers ForgeRock software or services to legal entities who have entered
+ * into a binding license agreement with ForgeRock.
  *
- * You can obtain a copy of the License at legal/CDDLv1.0.txt. See the License for the
- * specific language governing permission and limitations under the License.
- *
- * When distributing Covered Software, include this CDDL Header Notice in each file and include
- * the License file at legal/CDDLv1.0.txt. If applicable, add the following below the CDDL
- * Header, with the fields enclosed by brackets [] replaced by your own identifying
- * information: "Portions copyright [year] [name of copyright owner]".
- *
- * Copyright 2023 ForgeRock AS.
- * 
 -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -28,6 +18,20 @@
 
     <artifactId>rest-node</artifactId>
     <name>REST Node</name>
+
+<!--	<groupId>com.marketplace</groupId>-->
+<!--	<version>0.1.2</version>-->
+<!--	<name>Template for an Auth Tree Node maven project</name>-->
+<!--	<description>An Authentication Tree Node for ForgeRock's Identity Platform</description>-->
+
+
+	<properties>
+		<am.version>7.3.0</am.version>
+		<maven.compiler.source>11</maven.compiler.source>
+		<maven.compiler.target>11</maven.compiler.target>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<forgerockDistMgmtReleasesUrl>https://maven.forgerock.org/repo/internal-releases</forgerockDistMgmtReleasesUrl>
+	</properties>
 
     <dependencies>
         <dependency>

@@ -1,18 +1,9 @@
 /*
- * The contents of this file are subject to the terms of the Common Development and
- * Distribution License (the License). You may not use this file except in compliance with the
- * License.
- *
- * You can obtain a copy of the License at legal/CDDLv1.0.txt. See the License for the
- * specific language governing permission and limitations under the License.
- *
- * When distributing Covered Software, include this CDDL Header Notice in each file and include
- * the License file at legal/CDDLv1.0.txt. If applicable, add the following below the CDDL
- * Header, with the fields enclosed by brackets [] replaced by your own identifying
- * information: "Portions copyright [year] [name of copyright owner]".
- *
- * Copyright 2023 ForgeRock AS.
+ * This code is to be used exclusively in connection with ForgeRock’s software or services.
+ * ForgeRock only offers ForgeRock software or services to legal entities who have entered
+ * into a binding license agreement with ForgeRock.
  */
+
 /**
  * jon.knight@forgerock.com
  *
@@ -36,14 +27,8 @@ import org.forgerock.openam.sm.annotations.adapters.Password;
 
 import javax.security.auth.callback.Callback;
 
-import java.util.Optional;
-import java.util.Map;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Collection;
-import java.util.ResourceBundle;
+import java.util.*;
+
 import static java.util.Collections.emptyList;
 import java.util.stream.Collectors;
 import com.google.common.collect.ImmutableList;
@@ -91,7 +76,9 @@ import java.time.Duration;
  */
 
 @Node.Metadata(outcomeProvider = RESTNode.RESTOutcomeProvider.class,
-        configClass = RESTNode.Config.class)
+        configClass     = RESTNode.Config.class,
+        tags            = {"marketplace", "trustnetwork"}
+)
 public class RESTNode implements Node {
 
     private final Logger logger = LoggerFactory.getLogger(RESTNode.class);
@@ -187,7 +174,7 @@ public class RESTNode implements Node {
             logger.debug(loggerPrefix + "Final URL: " + url);
 
             // Create httpClient including mTLS certs and certificate checking if requested
-            HttpClient httpClient = getmTLShttpClient(config);
+            HttpClient httpClient = getmTLShttpClient(config, context);
 
             // Add request type, payload, timeouts, headers and send
             HttpResponse response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
@@ -314,7 +301,7 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-    public HttpClient getmTLShttpClient(Config config) {
+    public HttpClient getmTLShttpClient(Config config, TreeContext context,) {
 
         KeyManager[] keyManager = null;
         TrustManager[] trustManager = null;
@@ -374,6 +361,11 @@ public class RESTNode implements Node {
 
             return client;
         } catch (KeyManagementException | UnrecoverableKeyException | KeyStoreException | IOException | InvalidKeySpecException | NoSuchAlgorithmException | CertificateException e) {
+            String stackTrace = org.apache.commons.lang.exception.ExceptionUtils.getStackTrace(e);
+            logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
+            context.getStateFor(this).putShared(loggerPrefix + "Exception", new Date() + ": " + e.getMessage());
+            context.getStateFor(this).putShared(loggerPrefix + "StackTrace", new Date() + ": " + stackTrace);
+
             logger.error(loggerPrefix + "Exception occurred: " + e);
             return null;
         }          
@@ -448,36 +440,52 @@ public class RESTNode implements Node {
             return response;
         } catch (InterruptedException | IOException e) {
             logger.error(loggerPrefix + "Exception occurred: " + e);
+            String stackTrace = org.apache.commons.lang.exception.ExceptionUtils.getStackTrace(e);
+            logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
+            context.getStateFor(this).putShared(loggerPrefix + "Exception", new Date() + ": " + e.getMessage());
+            context.getStateFor(this).putShared(loggerPrefix + "StackTrace", new Date() + ": " + stackTrace);
+
             return null;
         }        
     }
+    public enum RestOutcomes {
 
+        SUCCESS_OUTCOME,
+        ERROR_OUTCOME
+    }
     /**
      * Populate node outcomes based on configuration options
      */
     public static class RESTOutcomeProvider implements OutcomeProvider {
         @Override
         public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
-
-            List<Outcome> outcomes;
-
-            try {
-                outcomes = nodeAttributes.get("responseCodes").required()
-                        .asList(String.class)
-                        .stream()
-                        .map(choice -> new Outcome(choice, choice))
-                        .collect(Collectors.toList());
-            } catch (JsonValueException e) {
-                outcomes = emptyList();
-            }
-
-            if (outcomes == null) outcomes = emptyList();
-            outcomes.add(new Outcome("Success","Success"));
-            outcomes.add(new Outcome("Error","Error"));
-
-            return outcomes;
+            ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTOutcomeProvider.class.getClassLoader());
+            return ImmutableList.of(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")), new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
         }
     }
+//    public static class RESTOutcomeProvider implements OutcomeProvider {
+//        @Override
+//        public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
+//
+//            List<Outcome> outcomes;
+//
+//            try {
+//                outcomes = nodeAttributes.get("responseCodes").required()
+//                        .asList(String.class)
+//                        .stream()
+//                        .map(choice -> new Outcome(choice, choice))
+//                        .collect(Collectors.toList());
+//            } catch (JsonValueException e) {
+//                outcomes = emptyList();
+//            }
+//
+//            if (outcomes == null) outcomes = emptyList();
+//            outcomes.add(new Outcome("Success","Success"));
+//            outcomes.add(new Outcome("Error","Error"));
+//
+//            return outcomes;
+//        }
+//    }
 
 
 }
