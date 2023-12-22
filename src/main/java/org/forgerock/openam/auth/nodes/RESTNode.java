@@ -456,36 +456,36 @@ public class RESTNode implements Node {
     /**
      * Populate node outcomes based on configuration options
      */
-    public static class RESTOutcomeProvider implements OutcomeProvider {
-        @Override
-        public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
-            ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTOutcomeProvider.class.getClassLoader());
-            return ImmutableList.of(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")), new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
-        }
+    // public static class RESTOutcomeProvider implements OutcomeProvider {
+    //     @Override
+    //     public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
+    //         ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTOutcomeProvider.class.getClassLoader());
+    //         return ImmutableList.of(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")), new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
+    //     }
     }
-//    public static class RESTOutcomeProvider implements OutcomeProvider {
-//        @Override
-//        public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
-//
-//            List<Outcome> outcomes;
-//
-//            try {
-//                outcomes = nodeAttributes.get("responseCodes").required()
-//                        .asList(String.class)
-//                        .stream()
-//                        .map(choice -> new Outcome(choice, choice))
-//                        .collect(Collectors.toList());
-//            } catch (JsonValueException e) {
-//                outcomes = emptyList();
-//            }
-//
-//            if (outcomes == null) outcomes = emptyList();
-//            outcomes.add(new Outcome("Success","Success"));
-//            outcomes.add(new Outcome("Error","Error"));
-//
-//            return outcomes;
-//        }
-//    }
+   public static class RESTOutcomeProvider implements OutcomeProvider {
+       @Override
+       public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
+
+           List<Outcome> outcomes;
+
+           try {
+               outcomes = nodeAttributes.get("responseCodes").required()
+                       .asList(String.class)
+                       .stream()
+                       .map(choice -> new Outcome(choice, choice))
+                       .collect(Collectors.toList());
+           } catch (JsonValueException e) {
+               outcomes = emptyList();
+           }
+
+           if (outcomes == null) outcomes = emptyList();
+                outcomes.add(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")));
+                outcomes.add(new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
+
+           return outcomes;
+       }
+   }
 
 
 }
