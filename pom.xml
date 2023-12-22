@@ -26,7 +26,7 @@
 
 
 	<properties>
-		<am.version>7.3.0</am.version>
+		<am.version>LATEST</am.version>
 		<maven.compiler.source>11</maven.compiler.source>
 		<maven.compiler.target>11</maven.compiler.target>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
