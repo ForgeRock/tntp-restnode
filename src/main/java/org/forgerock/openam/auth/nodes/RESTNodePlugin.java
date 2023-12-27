@@ -21,9 +21,6 @@ import org.forgerock.openam.auth.node.api.Node;
 import org.forgerock.openam.plugins.PluginException;
 import org.forgerock.openam.sm.AnnotatedServiceRegistry;
 
-import com.iplanet.sso.SSOException;
-import com.sun.identity.sm.SMSException;
-
 /**
  * Core nodes installed by default with no engine dependencies.
  */

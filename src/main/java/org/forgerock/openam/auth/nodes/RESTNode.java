@@ -13,69 +13,70 @@
 
 package org.forgerock.openam.auth.nodes;
 
-import com.google.inject.assistedinject.Assisted;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.forgerock.json.JsonValue;
-import org.forgerock.json.JsonValueException;
-import org.forgerock.openam.annotations.sm.Attribute;
-import org.forgerock.openam.auth.node.api.*;
-import org.forgerock.util.i18n.PreferredLocales;
-import static org.forgerock.openam.auth.node.api.Action.send;
-import org.forgerock.openam.utils.JsonValueBuilder;
-import org.forgerock.openam.sm.annotations.adapters.Password;
-
-import javax.security.auth.callback.Callback;
-
-import java.util.*;
-
 import static java.util.Collections.emptyList;
-import java.util.stream.Collectors;
-import com.google.common.collect.ImmutableList;
-import javax.inject.Inject;
-
-import java.security.cert.CertificateException;
-import java.security.cert.CertificateFactory;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.Certificate;
-import java.security.cert.X509Certificate;
-import java.security.Key;
-import java.security.KeyFactory;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.InvalidKeySpecException;
-import java.security.UnrecoverableKeyException;
-import java.security.KeyManagementException;
-import java.security.SecureRandom;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
-import javax.net.ssl.X509ExtendedTrustManager;
-import javax.net.ssl.SSLEngine;
-
+import java.net.Socket;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.URI;
-import java.net.Socket;
-
-import java.lang.InterruptedException;
+import java.security.Key;
+import java.security.KeyFactory;
+import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.util.Base64;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.ResourceBundle;
+import java.util.stream.Collectors;
+
+import javax.inject.Inject;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509ExtendedTrustManager;
+
+import org.forgerock.json.JsonValue;
+import org.forgerock.json.JsonValueException;
+import org.forgerock.openam.annotations.sm.Attribute;
+import org.forgerock.openam.auth.node.api.Action;
+import org.forgerock.openam.auth.node.api.Node;
+import org.forgerock.openam.auth.node.api.NodeProcessException;
+import org.forgerock.openam.auth.node.api.OutcomeProvider;
+import org.forgerock.openam.auth.node.api.TreeContext;
+import org.forgerock.openam.auth.nodes.RESTNode.RESTOutcomeProvider;
+import org.forgerock.util.i18n.PreferredLocales;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.inject.assistedinject.Assisted;
 
 
 /**
  * A node that executes a client-side Javascript and stores any resulting output in the shared state.
  */
 
-@Node.Metadata(outcomeProvider = RESTNode.RESTOutcomeProvider.class,
+@Node.Metadata(outcomeProvider = RESTOutcomeProvider.class,
         configClass     = RESTNode.Config.class,
         tags            = {"marketplace", "trustnetwork"}
 )
@@ -177,7 +178,7 @@ public class RESTNode implements Node {
             HttpClient httpClient = getmTLShttpClient(config, context);
 
             // Add request type, payload, timeouts, headers and send
-            HttpResponse response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
+            HttpResponse<String> response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
 
             if (response == null) {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
@@ -252,9 +253,9 @@ public class RESTNode implements Node {
                     if ((start != -1) && (end != -1)) {
                         target = target + source.substring(0, start);
                         String variable = source.substring(start + 2, end);
-                        JsonValue json = context.sharedState.get(variable);
-                        if (json.isString()) target += context.sharedState.get(variable).asString().replace("\\\"","");
-                        else target += context.sharedState.get(variable).toString();
+                        JsonValue json = context.getStateFor(this).get(variable);
+                        if (json.isString()) target += context.getStateFor(this).get(variable).asString().replace("\\\"","");
+                        else target += context.getStateFor(this).get(variable).toString();
                         source = source.substring(end + 2, source.length());
                     } else {
                         target = target + source;
@@ -374,10 +375,8 @@ public class RESTNode implements Node {
     /**
      * Call REST endpoint
      */
-    public HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
+    public HttpResponse<String> callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
         try {
-
-            String contentType;
             HttpRequest.Builder requestBuilder;
 
             switch(requestMode) {
@@ -462,12 +461,14 @@ public class RESTNode implements Node {
     //         ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTOutcomeProvider.class.getClassLoader());
     //         return ImmutableList.of(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")), new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
     //     }
-    }
+
    public static class RESTOutcomeProvider implements OutcomeProvider {
        @Override
        public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
 
            List<Outcome> outcomes;
+           ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTNode.class.getClassLoader());
+
 
            try {
                outcomes = nodeAttributes.get("responseCodes").required()
@@ -486,7 +487,6 @@ public class RESTNode implements Node {
            return outcomes;
        }
    }
-
 
 }
 
