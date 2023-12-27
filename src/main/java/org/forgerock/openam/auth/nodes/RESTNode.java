@@ -16,7 +16,6 @@ package org.forgerock.openam.auth.nodes;
 import static java.util.Collections.emptyList;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -24,23 +23,17 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.Key;
 import java.security.KeyFactory;
-import java.security.KeyManagementException;
 import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +63,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.inject.assistedinject.Assisted;
+import com.sun.identity.sm.RequiredValueValidator;
 
 
 /**
@@ -102,10 +96,10 @@ public class RESTNode implements Node {
      */
 
     public interface Config {
-        @Attribute(order = 100)
+        @Attribute(order = 100, validators = { RequiredValueValidator.class })
         default String restURL() { return ""; }
 
-        @Attribute(order = 200)
+        @Attribute(order = 200, validators = { RequiredValueValidator.class })
         default RequestMode requestMode() {
             return RequestMode.GET;
         }
@@ -123,12 +117,12 @@ public class RESTNode implements Node {
         @Attribute(order = 500)
         default String payload() { return ""; }
 
-        @Attribute(order = 550)
+        @Attribute(order = 550, validators = { RequiredValueValidator.class })
         default BodyType bodyType() {
             return BodyType.JSON;
         }
 
-        @Attribute(order = 600)
+        @Attribute(order = 600, validators = { RequiredValueValidator.class })
         default boolean usemTLS() { return false; }
 
         @Attribute(order = 700)
@@ -137,13 +131,13 @@ public class RESTNode implements Node {
         @Attribute(order = 800)
         default String privateKey() { return "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"; }
 
-        @Attribute(order = 820)
+        @Attribute(order = 820, validators = { RequiredValueValidator.class })
         default boolean disableCertChecks() { return false; }
 
-        @Attribute(order = 850)
+        @Attribute(order = 850, validators = { RequiredValueValidator.class })
         List<String> responseCodes();
 
-        @Attribute(order = 900)
+        @Attribute(order = 900, validators = { RequiredValueValidator.class })
         default String statusCodeReturn() { return "statusCode"; }
 
         @Attribute(order = 1000)
@@ -198,7 +192,7 @@ public class RESTNode implements Node {
             logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
             context.getStateFor(this).putShared(loggerPrefix + "Exception", ex.getMessage());
             context.getStateFor(this).putShared(loggerPrefix + "StackTrace", stackTrace);
-            return Action.goTo("error").build();
+            return Action.goTo("Error").build();
         } 
 
     }
@@ -206,9 +200,9 @@ public class RESTNode implements Node {
     /**
      * Try to match response code to user configured outcomes. Supports wildcards such as 2xx, 3xx, etc.
      */
-    public String calculateOutcome(List<String>outcomes, int statusCode)
+    private String calculateOutcome(List<String>outcomes, int statusCode) throws Exception
     {
-        String result = "Success";
+        String result = null;
         String statusCodeStr = Integer.toString(statusCode);
         // Catch wildcards first
         for (String outcome : outcomes) {
@@ -218,13 +212,15 @@ public class RESTNode implements Node {
         for (String outcome : outcomes) {
             if (outcome.equals(statusCodeStr)) result = outcome;
         }
+        if (result==null)
+        	throw new Exception("result didn't match any of the set Response Codes");
         return result;
     }
 
     /**
      * Convert query string map to URL encoded query string
      */
-    public String getQueryString(TreeContext context, Map<String, String> queryMap)
+    private String getQueryString(TreeContext context, Map<String, String> queryMap)
     {
         String result = "";
         Iterator<Map.Entry<String, String>> qmap = queryMap.entrySet().iterator(); 
@@ -242,32 +238,32 @@ public class RESTNode implements Node {
     /**
      * Process string to replace placeholder variables {{likethis}} with values from sharedState
      */
-    public String hydrate(TreeContext context, String source) {
-        try {
-            if (source != null) {
-                String target = "";
-                Boolean scanning = true;
-                while (scanning) {
-                    int start = source.indexOf("{{");
-                    int end = source.indexOf("}}");
-                    if ((start != -1) && (end != -1)) {
-                        target = target + source.substring(0, start);
-                        String variable = source.substring(start + 2, end);
-                        JsonValue json = context.getStateFor(this).get(variable);
-                        if (json.isString()) target += context.getStateFor(this).get(variable).asString().replace("\\\"","");
-                        else target += context.getStateFor(this).get(variable).toString();
-                        source = source.substring(end + 2, source.length());
-                    } else {
-                        target = target + source;
-                        scanning = false;
-                    }
-                }
-                return target;
-            } else return "";
-        } catch (NullPointerException | StringIndexOutOfBoundsException e) {
-            return "";
-        }
-    }
+	private String hydrate(TreeContext context, String source) {
+
+		if (source != null) {
+			String target = "";
+			Boolean scanning = true;
+			while (scanning) {
+				int start = source.indexOf("{{");
+				int end = source.indexOf("}}");
+				if ((start != -1) && (end != -1)) {
+					target = target + source.substring(0, start);
+					String variable = source.substring(start + 2, end);
+					JsonValue json = context.getStateFor(this).get(variable);
+					if (json.isString())
+						target += context.getStateFor(this).get(variable).asString().replace("\\\"", "");
+					else
+						target += context.getStateFor(this).get(variable).toString();
+					source = source.substring(end + 2, source.length());
+				} else {
+					target = target + source;
+					scanning = false;
+				}
+			}
+			return target;
+		} else
+			return "";
+	}
 
     /**
      * Implementation of a certificate trustmanager to ignore invalid cert problems (wrong host, expired, etc)
@@ -292,7 +288,7 @@ public class RESTNode implements Node {
     };
 
 
-    public static String getRandomString() {
+    private static String getRandomString() {
         byte[] bytes = new byte[24];
         SecureRandom random = new SecureRandom();
         random.nextBytes(bytes);
@@ -302,154 +298,119 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-    public HttpClient getmTLShttpClient(Config config, TreeContext context) {
+	private HttpClient getmTLShttpClient(Config config, TreeContext context) throws Exception {
 
-        KeyManager[] keyManager = null;
-        TrustManager[] trustManager = null;
-        SSLParameters sslParam = new SSLParameters();
+		KeyManager[] keyManager = null;
+		TrustManager[] trustManager = null;
+		SSLParameters sslParam = new SSLParameters();
 
-        // parse certificate
-        try {
-            if (config.usemTLS()) {
+		// parse certificate
 
-                final byte[] publicData = config.publicCert().replaceAll(" ","\n").replaceAll("\nCERTIFICATE"," CERTIFICATE").getBytes();
-                final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
+		if (config.usemTLS()) {
 
-                final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
-                final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(
-                    new ByteArrayInputStream(publicData));
+			final byte[] publicData = config.publicCert().replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
+			final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
 
-                logger.debug(loggerPrefix + "Successfully loaded the client cert certificate chain: " + String.join(" -> ", chain
-                    .stream()
-                    .map(certificate -> {
-                        if (certificate instanceof X509Certificate) {
-                            final X509Certificate x509Cert = (X509Certificate) certificate;
-                            return x509Cert.getSubjectDN().toString();
-                        } else {
-                            return certificate.getType();
-                        }
-                    }).collect(Collectors.toList())));
+			final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
+			final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(new ByteArrayInputStream(publicData));
 
-                final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
+			logger.debug(loggerPrefix + "Successfully loaded the client cert certificate chain: " + String.join(" -> ", chain.stream().map(certificate -> {
+				if (certificate instanceof X509Certificate) {
+					final X509Certificate x509Cert = (X509Certificate) certificate;
+					return x509Cert.getSubjectDN().toString();
+				} else {
+					return certificate.getType();
+				}
+			}).collect(Collectors.toList())));
 
-                // place cert+key into KeyStore
-                KeyStore clientKeyStore = KeyStore.getInstance("jks");
-                final char[] pwdChars = getRandomString().toCharArray(); // use a random string, like from java.security.SecureRandom
-                clientKeyStore.load(null, null);
-                clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
+			final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
 
-                // initialize KeyManagerFactory
-                KeyManagerFactory keyMgrFactory = KeyManagerFactory.getInstance("SunX509");
-                keyMgrFactory.init(clientKeyStore, pwdChars);
-                keyManager = keyMgrFactory.getKeyManagers();
+			// place cert+key into KeyStore
+			KeyStore clientKeyStore = KeyStore.getInstance("jks");
+			final char[] pwdChars = getRandomString().toCharArray(); // use a random string, like from java.security.SecureRandom
+			clientKeyStore.load(null, null);
+			clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
 
-                sslParam.setNeedClientAuth(true);
-            }
+			// initialize KeyManagerFactory
+			KeyManagerFactory keyMgrFactory = KeyManagerFactory.getInstance("SunX509");
+			keyMgrFactory.init(clientKeyStore, pwdChars);
+			keyManager = keyMgrFactory.getKeyManagers();
 
-            if (config.disableCertChecks()) {
-                trustManager = new TrustManager[]{insecureTrustManager};
-            }
+			sslParam.setNeedClientAuth(true);
+		}
 
-            // populate SSLContext with key manager
-            SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
-            sslCtx.init(keyManager, trustManager, null);
+		if (config.disableCertChecks()) {
+			trustManager = new TrustManager[] { insecureTrustManager };
+		}
 
-            HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(config.timeout()))
-                .sslContext(sslCtx)
-                .sslParameters(sslParam)
-                .build();
+		// populate SSLContext with key manager
+		SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
+		sslCtx.init(keyManager, trustManager, null);
 
-            return client;
-        } catch (KeyManagementException | UnrecoverableKeyException | KeyStoreException | IOException | InvalidKeySpecException | NoSuchAlgorithmException | CertificateException e) {
-            String stackTrace = org.apache.commons.lang.exception.ExceptionUtils.getStackTrace(e);
-            logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
-            context.getStateFor(this).putShared(loggerPrefix + "Exception", new Date() + ": " + e.getMessage());
-            context.getStateFor(this).putShared(loggerPrefix + "StackTrace", new Date() + ": " + stackTrace);
+		HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(config.timeout())).sslContext(sslCtx).sslParameters(sslParam).build();
 
-            logger.error(loggerPrefix + "Exception occurred: " + e);
-            return null;
-        }          
-    }
+		return client;
+	}
 
     /**
      * Call REST endpoint
      */
-    public HttpResponse<String> callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
-        try {
-            HttpRequest.Builder requestBuilder;
+	private HttpResponse<String> callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String, String> headersMap, BodyType bodyType, String payload, int timeout) throws Exception {
 
-            switch(requestMode) {
-                case POST:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .POST(HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case PUT:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .PUT(HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case DELETE:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .DELETE();
-                    break; 
-                case PATCH:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case HEAD:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .method("HEAD", HttpRequest.BodyPublishers.ofString(payload));
-                    break;                     
-                case GET:
-                default:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .GET();
-                    break;                                                           
-            }
+		HttpRequest.Builder requestBuilder;
 
-            switch (bodyType) {
-                case XWWWFORMURLENCODED:
-                    requestBuilder.header("content-type", "application/x-www-form-urlencoded");
-                    break;
-                case JSON:
-                    requestBuilder.header("content-type", "application/json");
-                    break;
-                case XML:
-                    requestBuilder.header("content-type", "application/xml");
-                    break;
-                case PLAIN:
-                default:
-                    requestBuilder.header("content-type", "text/plain");
-                    break;
-            }
+		switch (requestMode) {
+		case POST:
+			requestBuilder = HttpRequest.newBuilder().POST(HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case PUT:
+			requestBuilder = HttpRequest.newBuilder().PUT(HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case DELETE:
+			requestBuilder = HttpRequest.newBuilder().DELETE();
+			break;
+		case PATCH:
+			requestBuilder = HttpRequest.newBuilder().method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case HEAD:
+			requestBuilder = HttpRequest.newBuilder().method("HEAD", HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case GET:
+		default:
+			requestBuilder = HttpRequest.newBuilder().GET();
+			break;
+		}
 
-            for (Map.Entry<String, String> entry : headersMap.entrySet()) {
-                requestBuilder.header(entry.getKey(),hydrate(context, entry.getValue()));
-            }
+		switch (bodyType) {
+		case XWWWFORMURLENCODED:
+			requestBuilder.header("content-type", "application/x-www-form-urlencoded");
+			break;
+		case JSON:
+			requestBuilder.header("content-type", "application/json");
+			break;
+		case XML:
+			requestBuilder.header("content-type", "application/xml");
+			break;
+		case PLAIN:
+		default:
+			requestBuilder.header("content-type", "text/plain");
+			break;
+		}
 
-            HttpRequest request = requestBuilder
-                                    .uri(URI.create(url))
-                                    .timeout(Duration.ofSeconds(timeout))
-                                    .build();
+		for (Map.Entry<String, String> entry : headersMap.entrySet()) {
+			requestBuilder.header(entry.getKey(), hydrate(context, entry.getValue()));
+		}
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
-            logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
+		HttpRequest request = requestBuilder.uri(URI.create(url)).timeout(Duration.ofSeconds(timeout)).build();
 
-            return response;
-        } catch (InterruptedException | IOException e) {
-            logger.error(loggerPrefix + "Exception occurred: " + e);
-            String stackTrace = org.apache.commons.lang.exception.ExceptionUtils.getStackTrace(e);
-            logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
-            context.getStateFor(this).putShared(loggerPrefix + "Exception", new Date() + ": " + e.getMessage());
-            context.getStateFor(this).putShared(loggerPrefix + "StackTrace", new Date() + ": " + stackTrace);
+		HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+		logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
+		logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
 
-            return null;
-        }        
-    }
-    public enum RestOutcomes {
-
-        SUCCESS_OUTCOME,
+		return response;
+	}
+    
+    private enum RestOutcomes {
         ERROR_OUTCOME
     }
     /**
@@ -481,7 +442,6 @@ public class RESTNode implements Node {
            }
 
            if (outcomes == null) outcomes = emptyList();
-                outcomes.add(new Outcome(RestOutcomes.SUCCESS_OUTCOME.name(), bundle.getString("nextOutcome")));
                 outcomes.add(new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
 
            return outcomes;
