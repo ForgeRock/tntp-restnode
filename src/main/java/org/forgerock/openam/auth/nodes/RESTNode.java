@@ -13,8 +13,6 @@
 
 package org.forgerock.openam.auth.nodes;
 
-import static java.util.Collections.emptyList;
-
 import java.io.ByteArrayInputStream;
 import java.net.Socket;
 import java.net.URI;
@@ -31,6 +29,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
@@ -50,7 +49,6 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509ExtendedTrustManager;
 
 import org.forgerock.json.JsonValue;
-import org.forgerock.json.JsonValueException;
 import org.forgerock.openam.annotations.sm.Attribute;
 import org.forgerock.openam.auth.node.api.Action;
 import org.forgerock.openam.auth.node.api.Node;
@@ -81,8 +79,10 @@ public class RESTNode implements Node {
 
     private final Config config;
     private static final String BUNDLE = RESTNode.class.getName();
-
-
+    
+    private static final String NOMATCHRESPONSE = "NOMATCHRESPONSE";
+    private static final String ERROR = "ERROR";
+    
     public enum RequestMode {
         GET, POST, PUT, DELETE, PATCH, HEAD
     }
@@ -134,7 +134,7 @@ public class RESTNode implements Node {
         @Attribute(order = 820, validators = { RequiredValueValidator.class })
         default boolean disableCertChecks() { return false; }
 
-        @Attribute(order = 850, validators = { RequiredValueValidator.class })
+        @Attribute(order = 850)
         List<String> responseCodes();
 
         @Attribute(order = 900, validators = { RequiredValueValidator.class })
@@ -176,7 +176,7 @@ public class RESTNode implements Node {
 
             if (response == null) {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
-                return Action.goTo("Error").build();
+                return Action.goTo(ERROR).build();
             } else {
                 context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
                 context.getStateFor(this).putShared(config.bodyReturn(),response.body());
@@ -192,7 +192,7 @@ public class RESTNode implements Node {
             logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
             context.getStateFor(this).putShared(loggerPrefix + "Exception", ex.getMessage());
             context.getStateFor(this).putShared(loggerPrefix + "StackTrace", stackTrace);
-            return Action.goTo("Error").build();
+            return Action.goTo(ERROR).build();
         } 
 
     }
@@ -206,14 +206,15 @@ public class RESTNode implements Node {
         String statusCodeStr = Integer.toString(statusCode);
         // Catch wildcards first
         for (String outcome : outcomes) {
-            if (outcome.contains("xx") && (outcome.charAt(0) == statusCodeStr.charAt(0))) result = outcome;
+            if (outcome.contains("**") && (outcome.charAt(0) == statusCodeStr.charAt(0))) result = outcome;
         }
         // Override for explicit matches
         for (String outcome : outcomes) {
             if (outcome.equals(statusCodeStr)) result = outcome;
         }
         if (result==null)
-        	throw new Exception("result didn't match any of the set Response Codes");
+        	return NOMATCHRESPONSE;
+        	
         return result;
     }
 
@@ -410,9 +411,6 @@ public class RESTNode implements Node {
 		return response;
 	}
     
-    private enum RestOutcomes {
-        ERROR_OUTCOME
-    }
     /**
      * Populate node outcomes based on configuration options
      */
@@ -427,23 +425,19 @@ public class RESTNode implements Node {
        @Override
        public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
 
-           List<Outcome> outcomes;
+    	   List<Outcome> outcomes = new ArrayList<>();
            ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTNode.class.getClassLoader());
-
-
-           try {
-               outcomes = nodeAttributes.get("responseCodes").required()
+           
+           if (nodeAttributes.get("responseCodes").isNotNull())
+        	   outcomes = nodeAttributes.get("responseCodes").required()
                        .asList(String.class)
                        .stream()
                        .map(choice -> new Outcome(choice, choice))
                        .collect(Collectors.toList());
-           } catch (JsonValueException e) {
-               outcomes = emptyList();
-           }
-
-           if (outcomes == null) outcomes = emptyList();
-                outcomes.add(new Outcome(RestOutcomes.ERROR_OUTCOME.name(), bundle.getString("errorOutcome")));
-
+                      
+           outcomes.add(new Outcome(NOMATCHRESPONSE, bundle.getString("NoMatchOutcome")));
+           outcomes.add(new Outcome(ERROR, bundle.getString("ErrorOutcome")));
+                
            return outcomes;
        }
    }

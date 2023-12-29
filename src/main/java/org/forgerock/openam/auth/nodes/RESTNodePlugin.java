@@ -27,7 +27,7 @@ import org.forgerock.openam.sm.AnnotatedServiceRegistry;
 public class RESTNodePlugin extends AbstractNodeAmPlugin {
 
     private final AnnotatedServiceRegistry serviceRegistry;
-    static String currentVersion = "1.0.2";
+    static String currentVersion = "1.0.16";
     static final String logAppender = "[Version: " + currentVersion + "][Marketplace]";
 
     /**
