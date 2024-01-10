@@ -34,6 +34,7 @@ import static org.forgerock.openam.auth.node.api.Action.send;
 import org.forgerock.openam.utils.JsonValueBuilder;
 import org.forgerock.openam.sm.annotations.adapters.Password;
 
+import javax.mail.NoSuchProviderException;
 import javax.security.auth.callback.Callback;
 
 import java.util.Optional;
@@ -43,6 +44,7 @@ import java.util.List;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Collection;
+import java.util.Set;
 import java.util.ResourceBundle;
 import static java.util.Collections.emptyList;
 import java.util.stream.Collectors;
@@ -85,6 +87,10 @@ import java.net.Socket;
 import java.lang.InterruptedException;
 import java.time.Duration;
 
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
 
 /**
  * A node that executes a client-side Javascript and stores any resulting output in the shared state.
@@ -149,20 +155,26 @@ public class RESTNode implements Node {
         @Attribute(order = 800)
         default String privateKey() { return "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"; }
 
-        @Attribute(order = 820)
+        @Attribute(order = 900)
         default boolean disableCertChecks() { return false; }
 
-        @Attribute(order = 850)
-        List<String> responseCodes();
-
-        @Attribute(order = 900)
-        default String statusCodeReturn() { return "statusCode"; }
-
         @Attribute(order = 1000)
-        default String bodyReturn() { return "responseBody"; }
+        default int timeout() { return 30; }
 
         @Attribute(order = 1100)
-        default int timeout() { return 30; }
+        List<String> responseCodes();
+
+        @Attribute(order = 1200)
+        default String statusCodeReturn() { return "statusCode"; }
+
+        @Attribute(order = 1300)
+        default String bodyReturn() { return "responseBody"; }
+
+        @Attribute(order = 1400)
+        Map<String, String> jpToSSMapper();
+
+        @Attribute(order = 1500)
+        Map<String, String> jpToOutcomeMapper();
     }
 
 
@@ -198,9 +210,10 @@ public class RESTNode implements Node {
             } else {
                 context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
                 context.getStateFor(this).putShared(config.bodyReturn(),response.body());
+                processResponse(context, response.body().toString());
 
                 // Choose dynamic outcome if provided in config, e.g., response code 200, 401, etc
-                String outcome = calculateOutcome(config.responseCodes(), response.statusCode());
+                String outcome = calculateOutcome(config.responseCodes(), response.statusCode(), context, response.body().toString());
 
                 return Action.goTo(outcome).build();
             }
@@ -211,14 +224,35 @@ public class RESTNode implements Node {
             context.getStateFor(this).putShared(loggerPrefix + "Exception", ex.getMessage());
             context.getStateFor(this).putShared(loggerPrefix + "StackTrace", stackTrace);
             return Action.goTo("error").build();
-        } 
+        }
 
     }
+
+
+    public void processResponse(TreeContext context, String responseBody) {
+        NodeState nodeState = context.getStateFor(this);
+        Set<String> keys = config.jpToSSMapper().keySet();
+
+        Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
+
+        for (Iterator<String> i = keys.iterator(); i.hasNext();) {
+            String toSS = i.next();
+            String thisJPath = config.jpToSSMapper().get(toSS);
+            try {
+                Object val = JsonPath.read(document, thisJPath);
+                nodeState.putShared(toSS, val);
+            } catch (PathNotFoundException e) {
+                logger.error(loggerPrefix + " " + e);
+            }
+        }
+    }
+
+
 
     /**
      * Try to match response code to user configured outcomes. Supports wildcards such as 2xx, 3xx, etc.
      */
-    public String calculateOutcome(List<String>outcomes, int statusCode)
+    public String calculateOutcome(List<String>outcomes, int statusCode, TreeContext context, String responseBody)
     {
         String result = "Success";
         String statusCodeStr = Integer.toString(statusCode);
@@ -230,6 +264,25 @@ public class RESTNode implements Node {
         for (String outcome : outcomes) {
             if (outcome.equals(statusCodeStr)) result = outcome;
         }
+
+        // Calculate outcomes based on JSONpath filters. If any filter matches, the corresponding outcome is used.
+        // This superceeds any previous matching statusCode outcome
+        NodeState nodeState = context.getStateFor(this);
+        Set<String> keys = config.jpToOutcomeMapper().keySet();
+
+        responseBody = '[' + responseBody + ']'; // JSONpath expressions/filters only apply to arrays, so top-level JSON needs to be wrapped in an array
+        Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
+
+        for (Iterator<String> i = keys.iterator(); i.hasNext();) {
+            String toSS = i.next();
+            String thisJPath = config.jpToOutcomeMapper().get(toSS);
+            List<String> vals = JsonPath.read(document, thisJPath);
+            if (vals.size() > 0) {
+                result = toSS;
+                break;  // Exit at first matching outcome
+            }
+        }
+
         return result;
     }
 
@@ -253,6 +306,7 @@ public class RESTNode implements Node {
 
     /**
      * Process string to replace placeholder variables {{likethis}} with values from sharedState
+     * Values of the form {{variable.$.<jsonpath>}} will be retrieved from shared state, and processed by JSONpath
      */
     public String hydrate(TreeContext context, String source) {
         try {
@@ -265,9 +319,32 @@ public class RESTNode implements Node {
                     if ((start != -1) && (end != -1)) {
                         target = target + source.substring(0, start);
                         String variable = source.substring(start + 2, end);
-                        JsonValue json = context.sharedState.get(variable);
-                        if (json.isString()) target += context.sharedState.get(variable).asString().replace("\\\"","");
-                        else target += context.sharedState.get(variable).toString();
+
+                        if (variable.indexOf(".$.") > 0) {  // Use JSONpath substitution
+                            JsonValue thisJV = context.sharedState.get(variable.substring(0, variable.indexOf('.')));
+
+                            // If shared state value is stringified JSON then unescape it so it can be parsed
+                            String thisJVStr;
+                            if (thisJV.isString()) thisJVStr = thisJV.asString().replace("\\\"","");
+                            else thisJVStr = thisJV.toString();
+
+                            Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(thisJVStr);
+
+                            // Ignore (nullify) invalid JSON content
+                            try {
+                                Object val = JsonPath.read(document, variable.substring(variable.indexOf('.') + 1, variable.length()));
+                                target += val;
+                            } catch (PathNotFoundException e) {
+                                logger.error(loggerPrefix + " " + e);
+                                target += "null";
+                            }
+
+                        } else { // Use simple string substitution
+                            JsonValue json = context.sharedState.get(variable);
+                            if (json.isString()) target += context.sharedState.get(variable).asString().replace("\\\"","");
+                            else target += context.sharedState.get(variable).toString();
+                        }
+
                         source = source.substring(end + 2, source.length());
                     } else {
                         target = target + source;
@@ -345,8 +422,10 @@ public class RESTNode implements Node {
                 final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
 
                 // place cert+key into KeyStore
-                KeyStore clientKeyStore = KeyStore.getInstance("jks");
-                final char[] pwdChars = getRandomString().toCharArray(); // use a random string, like from java.security.SecureRandom
+                KeyStore clientKeyStore;
+                clientKeyStore = KeyStore.getInstance("jks"); // Replace with "bcfks" for FIPS compliant keystore
+
+                final char[] pwdChars = getRandomString().toCharArray();
                 clientKeyStore.load(null, null);
                 clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
 
@@ -472,6 +551,14 @@ public class RESTNode implements Node {
             }
 
             if (outcomes == null) outcomes = emptyList();
+
+            Map<String,Object> keys = nodeAttributes.get("jpToOutcomeMapper").required().asMap();
+            Set<String> keySet = keys.keySet();
+            for (Iterator<String> i = keySet.iterator(); i.hasNext();) {
+                String toSS = i.next();
+                outcomes.add(new Outcome(toSS, toSS));
+            }
+
             outcomes.add(new Outcome("Success","Success"));
             outcomes.add(new Outcome("Error","Error"));
 
