@@ -195,7 +195,7 @@ public class RESTNode implements Node {
             logger.debug(loggerPrefix + "Started");
 
             // Construct URL with query parameters including variable substitution from sharedState
-            String url = hydrate(context,config.restURL()) + getQueryString(context, config.queryParamsMap());
+            String url = hydrate(context,(config.restURL() + getQueryString(context, config.queryParamsMap())));
             logger.debug(loggerPrefix + "Final URL: " + url);
 
             // Create httpClient including mTLS certs and certificate checking if requested
@@ -294,12 +294,12 @@ public class RESTNode implements Node {
         String result = "";
         Iterator<Map.Entry<String, String>> qmap = queryMap.entrySet().iterator(); 
         if (qmap.hasNext()) {
-            Map.Entry<String, String> entry = qmap.next(); 
+            Map.Entry<String, String> entry = qmap.next();
             result += "?" + entry.getKey() + "=" + entry.getValue();
             while (qmap.hasNext()) {
                 entry = qmap.next(); 
-                result += "&" + entry.getKey() + "=" + hydrate(context, entry.getValue());
-            }          
+                result += "&" + entry.getKey() + "=" + entry.getValue();
+            }
         }
         return result;
     }
