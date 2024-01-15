@@ -165,10 +165,10 @@ public class RESTNode implements Node {
         List<String> responseCodes();
 
         @Attribute(order = 1200)
-        default String statusCodeReturn() { return "statusCode"; }
+        default String statusCodeReturn() { return ""; }
 
         @Attribute(order = 1300)
-        default String bodyReturn() { return "responseBody"; }
+        default String bodyReturn() { return ""; }
 
         @Attribute(order = 1400)
         Map<String, String> jpToSSMapper();
@@ -208,8 +208,8 @@ public class RESTNode implements Node {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
                 return Action.goTo("Error").build();
             } else {
-                context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
-                context.getStateFor(this).putShared(config.bodyReturn(),response.body());
+                if ((config.statusCodeReturn() != null) && (config.statusCodeReturn() != "")) context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
+                if ((config.bodyReturn() != null) && (config.bodyReturn() != "")) context.getStateFor(this).putShared(config.bodyReturn(),response.body());
                 processResponse(context, response.body().toString());
 
                 // Choose dynamic outcome if provided in config, e.g., response code 200, 401, etc
