@@ -92,6 +92,8 @@ import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.Option;
 import com.jayway.jsonpath.PathNotFoundException;
 
+
+
 /**
  * A node that executes a client-side Javascript and stores any resulting output in the shared state.
  */
@@ -137,6 +139,15 @@ public class RESTNode implements Node {
         default Map<String, String> headersMap() {
             return Collections.emptyMap();
         }
+
+        @Attribute(order = 450)
+        default boolean basicAuthn() { return false; }
+
+        @Attribute(order = 460)
+        default String basicAuthnUsername() { return ""; }
+
+        @Attribute(order = 470)
+        default String basicAuthnPassword() { return ""; }
 
         @Attribute(order = 500)
         default String payload() { return ""; }
@@ -513,6 +524,11 @@ public class RESTNode implements Node {
 
             for (Map.Entry<String, String> entry : headersMap.entrySet()) {
                 requestBuilder.header(entry.getKey(),hydrate(context, entry.getValue()));
+            }
+
+            if (config.basicAuthn()) {
+                String authHeader = "Basic " + Base64.getEncoder().encodeToString(hydrate(context,config.basicAuthnUsername() + ":" + config.basicAuthnPassword()).getBytes());
+                requestBuilder.header("authorization", authHeader);
             }
 
             HttpRequest request = requestBuilder
