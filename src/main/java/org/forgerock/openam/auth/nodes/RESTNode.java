@@ -12,85 +12,50 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2023 ForgeRock AS.
- */
-/**
- * jon.knight@forgerock.com
- *
- * An authentication node to generate REST API calls
+ * This code is to be used exclusively in connection with ForgeRock’s software or services.
+ * ForgeRock only offers ForgeRock software or services to legal entities who have entered
+ * into a binding license agreement with ForgeRock.
  */
 
 
 package org.forgerock.openam.auth.nodes;
 
 import com.google.inject.assistedinject.Assisted;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.JsonValueException;
 import org.forgerock.openam.annotations.sm.Attribute;
 import org.forgerock.openam.auth.node.api.*;
 import org.forgerock.util.i18n.PreferredLocales;
-import static org.forgerock.openam.auth.node.api.Action.send;
-import org.forgerock.openam.utils.JsonValueBuilder;
-import org.forgerock.openam.sm.annotations.adapters.Password;
+import com.sun.identity.sm.RequiredValueValidator;
 
-import javax.mail.NoSuchProviderException;
-import javax.security.auth.callback.Callback;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.util.Optional;
-import java.util.Map;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Collection;
-import java.util.Set;
-import java.util.ResourceBundle;
-import static java.util.Collections.emptyList;
-import java.util.stream.Collectors;
-import com.google.common.collect.ImmutableList;
 import javax.inject.Inject;
-
-import java.security.cert.CertificateException;
-import java.security.cert.CertificateFactory;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.Certificate;
-import java.security.cert.X509Certificate;
-import java.security.Key;
-import java.security.KeyFactory;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.InvalidKeySpecException;
-import java.security.UnrecoverableKeyException;
-import java.security.KeyManagementException;
-import java.security.SecureRandom;
-
+import javax.net.ssl.*;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
-import javax.net.ssl.X509ExtendedTrustManager;
-import javax.net.ssl.SSLEngine;
-
+import java.net.Socket;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.URI;
-import java.net.Socket;
-
-import java.lang.InterruptedException;
+import java.security.*;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.util.*;
+import java.util.stream.Collectors;
 
-import com.jayway.jsonpath.Configuration;
-import com.jayway.jsonpath.JsonPath;
-import com.jayway.jsonpath.Option;
-import com.jayway.jsonpath.PathNotFoundException;
+import static java.util.Collections.emptyList;
 
 
 
@@ -99,7 +64,9 @@ import com.jayway.jsonpath.PathNotFoundException;
  */
 
 @Node.Metadata(outcomeProvider = RESTNode.RESTOutcomeProvider.class,
-        configClass = RESTNode.Config.class)
+        configClass = RESTNode.Config.class,
+        tags            = {"marketplace", "trustnetwork"}
+)
 public class RESTNode implements Node {
 
     private final Logger logger = LoggerFactory.getLogger(RESTNode.class);
@@ -108,6 +75,8 @@ public class RESTNode implements Node {
     private final Config config;
     private static final String BUNDLE = RESTNode.class.getName();
 
+    private static final String NOMATCHRESPONSE = "NOMATCHRESPONSE";
+    private static final String ERROR = "ERROR";
 
     public enum RequestMode {
         GET, POST, PUT, DELETE, PATCH, HEAD
@@ -122,10 +91,10 @@ public class RESTNode implements Node {
      */
 
     public interface Config {
-        @Attribute(order = 100)
+        @Attribute(order = 100, validators = { RequiredValueValidator.class })
         default String restURL() { return ""; }
 
-        @Attribute(order = 200)
+        @Attribute(order = 200, validators = { RequiredValueValidator.class })
         default RequestMode requestMode() {
             return RequestMode.GET;
         }
@@ -152,7 +121,7 @@ public class RESTNode implements Node {
         @Attribute(order = 500)
         default String payload() { return ""; }
 
-        @Attribute(order = 550)
+        @Attribute(order = 55, validators = { RequiredValueValidator.class })
         default BodyType bodyType() {
             return BodyType.JSON;
         }
@@ -213,7 +182,7 @@ public class RESTNode implements Node {
             HttpClient httpClient = getmTLShttpClient(config);
 
             // Add request type, payload, timeouts, headers and send
-            HttpResponse response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
+            HttpResponse<String> response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
 
             if (response == null) {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
@@ -234,13 +203,13 @@ public class RESTNode implements Node {
             logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
             context.getStateFor(this).putShared(loggerPrefix + "Exception", ex.getMessage());
             context.getStateFor(this).putShared(loggerPrefix + "StackTrace", stackTrace);
-            return Action.goTo("error").build();
+            return Action.goTo(ERROR).build();
         }
 
     }
 
 
-    public void processResponse(TreeContext context, String responseBody) {
+    private void processResponse(TreeContext context, String responseBody) {
         NodeState nodeState = context.getStateFor(this);
         Set<String> keys = config.jpToSSMapper().keySet();
 
@@ -263,9 +232,9 @@ public class RESTNode implements Node {
     /**
      * Try to match response code to user configured outcomes. Supports wildcards such as 2xx, 3xx, etc.
      */
-    public String calculateOutcome(List<String>outcomes, int statusCode, TreeContext context, String responseBody)
+    private String calculateOutcome(List<String>outcomes, int statusCode, TreeContext context, String responseBody)
     {
-        String result = "Success";
+        String result = null;
         String statusCodeStr = Integer.toString(statusCode);
         // Catch wildcards first
         for (String outcome : outcomes) {
@@ -294,13 +263,16 @@ public class RESTNode implements Node {
             }
         }
 
+        if (result == null)
+            return NOMATCHRESPONSE;
+
         return result;
     }
 
     /**
      * Convert query string map to URL encoded query string
      */
-    public String getQueryString(TreeContext context, Map<String, String> queryMap)
+    private String getQueryString(TreeContext context, Map<String, String> queryMap)
     {
         String result = "";
         Iterator<Map.Entry<String, String>> qmap = queryMap.entrySet().iterator(); 
@@ -319,7 +291,7 @@ public class RESTNode implements Node {
      * Process string to replace placeholder variables {{likethis}} with values from sharedState
      * Values of the form {{variable.$.<jsonpath>}} will be retrieved from shared state, and processed by JSONpath
      */
-    public String hydrate(TreeContext context, String source) {
+    private String hydrate(TreeContext context, String source) {
         try {
             if (source != null) {
                 String target = "";
@@ -392,7 +364,7 @@ public class RESTNode implements Node {
     };
 
 
-    public static String getRandomString() {
+    private static String getRandomString() {
         byte[] bytes = new byte[24];
         SecureRandom random = new SecureRandom();
         random.nextBytes(bytes);
@@ -402,7 +374,7 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-    public HttpClient getmTLShttpClient(Config config) {
+    private HttpClient getmTLShttpClient(Config config) {
 
         KeyManager[] keyManager = null;
         TrustManager[] trustManager = null;
@@ -472,7 +444,7 @@ public class RESTNode implements Node {
     /**
      * Call REST endpoint
      */
-    public HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
+    private HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
         try {
 
             String contentType;
@@ -555,6 +527,7 @@ public class RESTNode implements Node {
         public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
 
             List<Outcome> outcomes;
+            ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTNode.class.getClassLoader());
 
             try {
                 outcomes = nodeAttributes.get("responseCodes").required()
@@ -575,8 +548,8 @@ public class RESTNode implements Node {
                 outcomes.add(new Outcome(toSS, toSS));
             }
 
-            outcomes.add(new Outcome("Success","Success"));
-            outcomes.add(new Outcome("Error","Error"));
+            outcomes.add(new Outcome(NOMATCHRESPONSE, bundle.getString("NoMatchOutcome")));
+            outcomes.add(new Outcome(ERROR, bundle.getString("ErrorOutcome")));
 
             return outcomes;
         }

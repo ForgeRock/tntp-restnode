@@ -12,26 +12,22 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2023 ForgeRock AS.
- */
-/*
- * jon.knight@forgerock.com
- *
- * Needed to register the node
+ * This code is to be used exclusively in connection with ForgeRock’s software or services.
+ * ForgeRock only offers ForgeRock software or services to legal entities who have entered
+ * into a binding license agreement with ForgeRock.
  */
 
 package org.forgerock.openam.auth.nodes;
-
-import static java.util.Arrays.asList;
-
-import javax.inject.Inject;
 
 import org.forgerock.openam.auth.node.api.AbstractNodeAmPlugin;
 import org.forgerock.openam.auth.node.api.Node;
 import org.forgerock.openam.plugins.PluginException;
 import org.forgerock.openam.sm.AnnotatedServiceRegistry;
 
-import com.iplanet.sso.SSOException;
-import com.sun.identity.sm.SMSException;
+import javax.inject.Inject;
+
+import static java.util.Arrays.asList;
+
 
 /**
  * Core nodes installed by default with no engine dependencies.
