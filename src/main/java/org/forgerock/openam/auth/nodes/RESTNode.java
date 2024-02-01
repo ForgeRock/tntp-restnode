@@ -25,6 +25,8 @@ import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.Option;
 import com.jayway.jsonpath.PathNotFoundException;
+import com.jayway.jsonpath.spi.json.JsonOrgJsonProvider;
+//import io.vavr.collection.LinkedHashMap;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.JsonValueException;
 import org.forgerock.openam.annotations.sm.Attribute;
@@ -32,6 +34,8 @@ import org.forgerock.openam.auth.node.api.*;
 import org.forgerock.util.i18n.PreferredLocales;
 import com.sun.identity.sm.RequiredValueValidator;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -186,7 +190,7 @@ public class RESTNode implements Node {
 
             if (response == null) {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
-                return Action.goTo("Error").build();
+                return Action.goTo(ERROR).build();
             } else {
                 if ((config.statusCodeReturn() != null) && (config.statusCodeReturn() != "")) context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
                 if ((config.bodyReturn() != null) && (config.bodyReturn() != "")) context.getStateFor(this).putShared(config.bodyReturn(),response.body());
@@ -220,7 +224,14 @@ public class RESTNode implements Node {
             String thisJPath = config.jpToSSMapper().get(toSS);
             try {
                 Object val = JsonPath.read(document, thisJPath);
-                nodeState.putShared(toSS, val);
+                if (val instanceof java.util.LinkedHashMap) {
+                    JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
+                    nodeState.putShared(toSS, json);
+                } else if (val instanceof net.minidev.json.JSONArray) {
+                    nodeState.putShared(toSS,((net.minidev.json.JSONArray)val));
+                } else {
+                    nodeState.putShared(toSS, val);
+                }
             } catch (PathNotFoundException e) {
                 logger.error(loggerPrefix + " " + e);
             }
@@ -315,8 +326,16 @@ public class RESTNode implements Node {
 
                             // Ignore (nullify) invalid JSON content
                             try {
+
                                 Object val = JsonPath.read(document, variable.substring(variable.indexOf('.') + 1, variable.length()));
-                                target += val;
+                                if (val instanceof java.util.LinkedHashMap) {
+                                    JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
+                                    target += json.toString();
+                                } else if (val instanceof net.minidev.json.JSONArray) {
+                                    target += ((net.minidev.json.JSONArray)val).toJSONString();
+                                } else {
+                                    target += val.toString();
+                                }
                             } catch (PathNotFoundException e) {
                                 logger.error(loggerPrefix + " " + e);
                                 target += "null";
@@ -486,7 +505,7 @@ public class RESTNode implements Node {
                     requestBuilder.header("content-type", "application/json");
                     break;
                 case XML:
-                    requestBuilder.header("content-type", "application/xml");
+                    requestBuilder.header("content-type", "text/xml");
                     break;
                 case PLAIN:
                 default:
