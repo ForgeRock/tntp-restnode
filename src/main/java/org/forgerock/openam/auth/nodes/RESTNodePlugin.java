@@ -35,7 +35,7 @@ import static java.util.Arrays.asList;
 public class RESTNodePlugin extends AbstractNodeAmPlugin {
 
     private final AnnotatedServiceRegistry serviceRegistry;
-    static String currentVersion = "1.0.0";
+    static String currentVersion = "7.4.4";
     static final String logAppender = "[Version: " + currentVersion + "][Marketplace]";
 
     /**

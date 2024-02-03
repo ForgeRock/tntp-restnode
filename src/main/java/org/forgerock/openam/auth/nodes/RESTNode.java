@@ -20,52 +20,64 @@
 
 package org.forgerock.openam.auth.nodes;
 
-import com.google.inject.assistedinject.Assisted;
-import com.jayway.jsonpath.Configuration;
-import com.jayway.jsonpath.JsonPath;
-import com.jayway.jsonpath.Option;
-import com.jayway.jsonpath.PathNotFoundException;
-import com.jayway.jsonpath.spi.json.JsonOrgJsonProvider;
-//import io.vavr.collection.LinkedHashMap;
-import org.forgerock.json.JsonValue;
-import org.forgerock.json.JsonValueException;
-import org.forgerock.openam.annotations.sm.Attribute;
-import org.forgerock.openam.auth.node.api.*;
-import org.forgerock.util.i18n.PreferredLocales;
-import com.sun.identity.sm.RequiredValueValidator;
+import static java.util.Collections.emptyList;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.inject.Inject;
-import javax.net.ssl.*;
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.security.*;
+import java.security.Key;
+import java.security.KeyFactory;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
-import java.util.*;
+import java.util.Base64;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.ResourceBundle;
+import java.util.Set;
 import java.util.stream.Collectors;
 
-import static java.util.Collections.emptyList;
+import javax.inject.Inject;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509ExtendedTrustManager;
 
+import org.forgerock.json.JsonValue;
+import org.forgerock.json.JsonValueException;
+import org.forgerock.openam.annotations.sm.Attribute;
+import org.forgerock.openam.auth.node.api.Action;
+import org.forgerock.openam.auth.node.api.Node;
+import org.forgerock.openam.auth.node.api.NodeProcessException;
+import org.forgerock.openam.auth.node.api.NodeState;
+import org.forgerock.openam.auth.node.api.OutcomeProvider;
+import org.forgerock.openam.auth.node.api.TreeContext;
+import org.forgerock.util.i18n.PreferredLocales;
+import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-
-/**
- * A node that executes a client-side Javascript and stores any resulting output in the shared state.
- */
+import com.google.inject.assistedinject.Assisted;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.sun.identity.sm.RequiredValueValidator;
 
 @Node.Metadata(outcomeProvider = RESTNode.RESTOutcomeProvider.class,
         configClass = RESTNode.Config.class,
@@ -213,6 +225,8 @@ public class RESTNode implements Node {
     }
 
 
+    //TODO JK - any reason not to throw the exception thrown in this method, instead of catching it and logging it here
+    
     private void processResponse(TreeContext context, String responseBody) {
         NodeState nodeState = context.getStateFor(this);
         Set<String> keys = config.jpToSSMapper().keySet();
@@ -258,7 +272,7 @@ public class RESTNode implements Node {
 
         // Calculate outcomes based on JSONpath filters. If any filter matches, the corresponding outcome is used.
         // This superceeds any previous matching statusCode outcome
-        NodeState nodeState = context.getStateFor(this);
+
         Set<String> keys = config.jpToOutcomeMapper().keySet();
 
         responseBody = '[' + responseBody + ']'; // JSONpath expressions/filters only apply to arrays, so top-level JSON needs to be wrapped in an array
@@ -315,7 +329,7 @@ public class RESTNode implements Node {
                         String variable = source.substring(start + 2, end);
 
                         if (variable.indexOf(".$.") > 0) {  // Use JSONpath substitution
-                            JsonValue thisJV = context.sharedState.get(variable.substring(0, variable.indexOf('.')));
+                            JsonValue thisJV = context.getStateFor(this).get(variable.substring(0, variable.indexOf('.')));
 
                             // If shared state value is stringified JSON then unescape it so it can be parsed
                             String thisJVStr;
@@ -342,9 +356,9 @@ public class RESTNode implements Node {
                             }
 
                         } else { // Use simple string substitution
-                            JsonValue json = context.sharedState.get(variable);
-                            if (json.isString()) target += context.sharedState.get(variable).asString().replace("\\\"","");
-                            else target += context.sharedState.get(variable).toString();
+                            JsonValue json = context.getStateFor(this).get(variable);
+                            if (json.isString()) target += context.getStateFor(this).get(variable).asString().replace("\\\"","");
+                            else target += context.getStateFor(this).get(variable).toString();
                         }
 
                         source = source.substring(end + 2, source.length());
@@ -393,150 +407,126 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-    private HttpClient getmTLShttpClient(Config config) {
+	private HttpClient getmTLShttpClient(Config config) throws Exception {
 
-        KeyManager[] keyManager = null;
-        TrustManager[] trustManager = null;
-        SSLParameters sslParam = new SSLParameters();
+		KeyManager[] keyManager = null;
+		TrustManager[] trustManager = null;
+		SSLParameters sslParam = new SSLParameters();
 
-        // parse certificate
-        try {
-            if (config.usemTLS()) {
+		// parse certificate
 
-                final byte[] publicData = config.publicCert().replaceAll(" ","\n").replaceAll("\nCERTIFICATE"," CERTIFICATE").getBytes();
-                final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
+		if (config.usemTLS()) {
 
-                final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
-                final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(
-                    new ByteArrayInputStream(publicData));
+			final byte[] publicData = config.publicCert().replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
+			final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
 
-                logger.debug(loggerPrefix + "Successfully loaded the client cert certificate chain: " + String.join(" -> ", chain
-                    .stream()
-                    .map(certificate -> {
-                        if (certificate instanceof X509Certificate) {
-                            final X509Certificate x509Cert = (X509Certificate) certificate;
-                            return x509Cert.getSubjectDN().toString();
-                        } else {
-                            return certificate.getType();
-                        }
-                    }).collect(Collectors.toList())));
+			final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
+			final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(new ByteArrayInputStream(publicData));
 
-                final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
+			logger.debug(loggerPrefix + "Successfully loaded the client cert certificate chain: " + String.join(" -> ", chain.stream().map(certificate -> {
+				if (certificate instanceof X509Certificate) {
+					final X509Certificate x509Cert = (X509Certificate) certificate;
+					return x509Cert.getSubjectDN().toString();
+				} else {
+					return certificate.getType();
+				}
+			}).collect(Collectors.toList())));
 
-                // place cert+key into KeyStore
-                KeyStore clientKeyStore;
-                clientKeyStore = KeyStore.getInstance("jks"); // Replace with "bcfks" for FIPS compliant keystore
+			final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
 
-                final char[] pwdChars = getRandomString().toCharArray();
-                clientKeyStore.load(null, null);
-                clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
+			// place cert+key into KeyStore
+			KeyStore clientKeyStore;
+			clientKeyStore = KeyStore.getInstance("jks"); // Replace with "bcfks" for FIPS compliant keystore
 
-                // initialize KeyManagerFactory
-                KeyManagerFactory keyMgrFactory = KeyManagerFactory.getInstance("SunX509");
-                keyMgrFactory.init(clientKeyStore, pwdChars);
-                keyManager = keyMgrFactory.getKeyManagers();
+			final char[] pwdChars = getRandomString().toCharArray();
+			clientKeyStore.load(null, null);
+			clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
 
-                sslParam.setNeedClientAuth(true);
-            }
+			// initialize KeyManagerFactory
+			KeyManagerFactory keyMgrFactory = KeyManagerFactory.getInstance("SunX509");
+			keyMgrFactory.init(clientKeyStore, pwdChars);
+			keyManager = keyMgrFactory.getKeyManagers();
 
-            if (config.disableCertChecks()) {
-                trustManager = new TrustManager[]{insecureTrustManager};
-            }
+			sslParam.setNeedClientAuth(true);
+		}
 
-            // populate SSLContext with key manager
-            SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
-            sslCtx.init(keyManager, trustManager, null);
+		if (config.disableCertChecks()) {
+			trustManager = new TrustManager[] { insecureTrustManager };
+		}
 
-            HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(config.timeout()))
-                .sslContext(sslCtx)
-                .sslParameters(sslParam)
-                .build();
+		// populate SSLContext with key manager
+		SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
+		sslCtx.init(keyManager, trustManager, null);
 
-            return client;
-        } catch (KeyManagementException | UnrecoverableKeyException | KeyStoreException | IOException | InvalidKeySpecException | NoSuchAlgorithmException | CertificateException e) {
-            logger.error(loggerPrefix + "Exception occurred: " + e);
-            return null;
-        }          
-    }
+		HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(config.timeout())).sslContext(sslCtx).sslParameters(sslParam).build();
+
+		return client;
+
+	}
 
     /**
      * Call REST endpoint
      */
-    private HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String,String> headersMap, BodyType bodyType, String payload, int timeout) {
-        try {
+	private HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String, String> headersMap, BodyType bodyType, String payload, int timeout) throws Exception {
 
-            String contentType;
-            HttpRequest.Builder requestBuilder;
+		HttpRequest.Builder requestBuilder;
 
-            switch(requestMode) {
-                case POST:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .POST(HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case PUT:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .PUT(HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case DELETE:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .DELETE();
-                    break; 
-                case PATCH:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
-                    break; 
-                case HEAD:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .method("HEAD", HttpRequest.BodyPublishers.ofString(payload));
-                    break;                     
-                case GET:
-                default:
-                    requestBuilder = HttpRequest.newBuilder()
-                        .GET();
-                    break;                                                           
-            }
+		switch (requestMode) {
+		case POST:
+			requestBuilder = HttpRequest.newBuilder().POST(HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case PUT:
+			requestBuilder = HttpRequest.newBuilder().PUT(HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case DELETE:
+			requestBuilder = HttpRequest.newBuilder().DELETE();
+			break;
+		case PATCH:
+			requestBuilder = HttpRequest.newBuilder().method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case HEAD:
+			requestBuilder = HttpRequest.newBuilder().method("HEAD", HttpRequest.BodyPublishers.ofString(payload));
+			break;
+		case GET:
+		default:
+			requestBuilder = HttpRequest.newBuilder().GET();
+			break;
+		}
 
-            switch (bodyType) {
-                case XWWWFORMURLENCODED:
-                    requestBuilder.header("content-type", "application/x-www-form-urlencoded");
-                    break;
-                case JSON:
-                    requestBuilder.header("content-type", "application/json");
-                    break;
-                case XML:
-                    requestBuilder.header("content-type", "text/xml");
-                    break;
-                case PLAIN:
-                default:
-                    requestBuilder.header("content-type", "text/plain");
-                    break;
-            }
+		switch (bodyType) {
+		case XWWWFORMURLENCODED:
+			requestBuilder.header("content-type", "application/x-www-form-urlencoded");
+			break;
+		case JSON:
+			requestBuilder.header("content-type", "application/json");
+			break;
+		case XML:
+			requestBuilder.header("content-type", "text/xml");
+			break;
+		case PLAIN:
+		default:
+			requestBuilder.header("content-type", "text/plain");
+			break;
+		}
 
-            for (Map.Entry<String, String> entry : headersMap.entrySet()) {
-                requestBuilder.header(entry.getKey(),hydrate(context, entry.getValue()));
-            }
+		for (Map.Entry<String, String> entry : headersMap.entrySet()) {
+			requestBuilder.header(entry.getKey(), hydrate(context, entry.getValue()));
+		}
 
-            if (config.basicAuthn()) {
-                String authHeader = "Basic " + Base64.getEncoder().encodeToString(hydrate(context,config.basicAuthnUsername() + ":" + config.basicAuthnPassword()).getBytes());
-                requestBuilder.header("authorization", authHeader);
-            }
+		if (config.basicAuthn()) {
+			String authHeader = "Basic " + Base64.getEncoder().encodeToString(hydrate(context, config.basicAuthnUsername() + ":" + config.basicAuthnPassword()).getBytes());
+			requestBuilder.header("authorization", authHeader);
+		}
 
-            HttpRequest request = requestBuilder
-                                    .uri(URI.create(url))
-                                    .timeout(Duration.ofSeconds(timeout))
-                                    .build();
+		HttpRequest request = requestBuilder.uri(URI.create(url)).timeout(Duration.ofSeconds(timeout)).build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
-            logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
+		HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+		logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
+		logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
 
-            return response;
-        } catch (InterruptedException | IOException e) {
-            logger.error(loggerPrefix + "Exception occurred: " + e);
-            return null;
-        }        
-    }
+		return response;
+
+	}
 
     /**
      * Populate node outcomes based on configuration options
