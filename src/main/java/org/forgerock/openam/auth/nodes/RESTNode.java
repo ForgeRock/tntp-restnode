@@ -99,7 +99,7 @@ public class RESTNode implements Node {
     }
 
     public enum BodyType {
-        XWWWFORMURLENCODED, JSON, XML, PLAIN
+        XWWWFORMURLENCODED, JSON, XML, PLAIN, CUSTOM
     }
 
     /**
