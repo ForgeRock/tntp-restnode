@@ -1,0 +1,8 @@
+org/forgerock/openam/auth/nodes/RESTNode$2.class
+org/forgerock/openam/auth/nodes/RESTNode$BodyType.class
+org/forgerock/openam/auth/nodes/RESTNode$RequestMode.class
+org/forgerock/openam/auth/nodes/RESTNode$1.class
+org/forgerock/openam/auth/nodes/RESTNode$RESTOutcomeProvider.class
+org/forgerock/openam/auth/nodes/RESTNode.class
+org/forgerock/openam/auth/nodes/RESTNode$Config.class
+org/forgerock/openam/auth/nodes/RESTNodePlugin.class

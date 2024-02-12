@@ -13,8 +13,8 @@
 	<groupId>org.forgerock.am</groupId>
 	<version>7.4.4</version>
 	<modelVersion>4.0.0</modelVersion>
-	<artifactId>rest-node</artifactId>
-	<name>REST Node</name>
+	<artifactId>http-client</artifactId>
+	<name>HTTP Client</name>
 
 	<properties>
 		<am.version>LATEST</am.version>
