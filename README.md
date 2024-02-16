@@ -1,31 +1,31 @@
-# HTTP Request
+# HTTP Client
 
-The **HTTP Request** node enables HTTP(S) requests to be made to external APIs and services directly from within a [journey](https://backstage.forgerock.com/docs/idcloud/latest/realms/journeys.html).
+The **HTTP Client** node enables HTTP(S) requests to be made to external APIs and services directly from within a [journey](https://backstage.forgerock.com/docs/idcloud/latest/realms/journeys.html).
 
 This node can be used to simplify integration with a broad range of external services such as REST APIs to invoke actions or retrieve data for use in subsequent nodes in a journey.
 The node can be configured to make GET, POST, PUT, DELETE, PATCH and HEAD requests, include headers, request parameters, payloads, and send certificates for endpoints secured using mTLS. The node also allows response body contents to be saved to shared state and response codes to be handled by configurable outcomes.
 
-Identity Cloud provides these artifacts for HTTP Request authentication journeys:
+Identity Cloud provides these artifacts for HTTP Client authentication journeys:
 
-- [HTTP Request node](#)
+- [HTTP Client node](#)
 
 ## Quick start with sample journeys
 
-Identity Cloud provides sample journeys to help you understand some common uses cases for HTTP Request. To use the samples, perform these steps:
+Identity Cloud provides sample journeys to help you understand some common uses cases for HTTP Client. To use the samples, perform these steps:
 
 1. Download the JSON files for sample journeys from [here](#).
 2. Import the downloaded sample journeys into your Identity Cloud environment.
 
-For more information on sample journeys, refer to [HTTP Request sample journeys.](#)
+For more information on sample journeys, refer to [HTTP Client sample journeys.](#)
 
 ## Setup
 
 No specific setup steps are required to use this node, however, if you wish to use this node to make calls to Mutual Transport Layer Security (mTLS) secured endpoints then a valid X.509 digital certificate must be provided. The node should be configured with both the public certificate and private key components in PEM format. These values can be simply added to the node configuration or, for greater flexibility and ease of management it is recommended to use [Identity Cloud ESVs](https://backstage.forgerock.com/docs/idcloud/latest/tenants/esvs.html).   
 
 
-# HTTP Request Node
+# HTTP Client Node
 
-The **HTTP Request** node enables HTTP(S) requests to be made to external APIs and services directly from within a [journey](https://backstage.forgerock.com/docs/idcloud/latest/realms/journeys.html).
+The **HTTP Client** node enables HTTP(S) requests to be made to external APIs and services directly from within a [journey](https://backstage.forgerock.com/docs/idcloud/latest/realms/journeys.html).
 
 ## Compatibility
 
