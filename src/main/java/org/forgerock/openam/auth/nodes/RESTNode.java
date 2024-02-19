@@ -263,7 +263,6 @@ public class RESTNode implements Node {
 
         Set<String> keys = config.jpToOutcomeMapper().keySet();
 
-        responseBody = '[' + responseBody + ']'; // JSONpath expressions/filters only apply to arrays, so top-level JSON needs to be wrapped in an array
         Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
 
         for (Iterator<String> i = keys.iterator(); i.hasNext();) {
