@@ -36,6 +36,8 @@ import java.util.Map;
 import java.util.ResourceBundle;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.inject.Inject;
 import javax.net.ssl.KeyManager;
@@ -299,67 +301,73 @@ public class RESTNode implements Node {
         return result;
     }
 
+
     /**
-     * Process string to replace placeholder variables {{likethis}} with values from sharedState
-     * Values of the form {{variable.$.<jsonpath>}} will be retrieved from shared state, and processed by JSONpath
+     * Process string to replace placeholder variables ${likethis} with values from sharedState
+     * Values of the form ${variable.$.<jsonpath>} will be retrieved from shared state, and processed by JSONpath
      */
+    private String hydrateVariable(TreeContext context, String input) {
+        if (input.indexOf(".$.") > 0) {  // Use JSONpath substitution
+            JsonValue thisJV = context.sharedState.get(input.substring(0, input.indexOf('.')));
+
+            // If shared state value is stringified JSON then unescape it so it can be parsed
+            String thisJVStr;
+            if (thisJV.isString()) thisJVStr = thisJV.asString().replace("\\\"","");
+            else thisJVStr = thisJV.toString();
+
+            Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(thisJVStr);
+
+            // Ignore (nullify) invalid JSON content
+            try {
+
+                Object val = JsonPath.read(document, input.substring(input.indexOf('.') + 1, input.length()));
+                if (val instanceof java.util.LinkedHashMap) {
+                    JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
+                    return json.toString();
+                } else if (val instanceof net.minidev.json.JSONArray) {
+                    return  ((net.minidev.json.JSONArray)val).toJSONString();
+                } else {
+                    return val.toString();
+                }
+            } catch (PathNotFoundException e) {
+                logger.error(loggerPrefix + " " + e);
+                return null;
+            }
+
+        } else { // Use simple string substitution
+            JsonValue json = context.sharedState.get(input);
+            if (json.isString()) return context.sharedState.get(input).asString().replace("\\\"","");
+            else return context.sharedState.get(input).toString();
+        }
+    }
+
+
     private String hydrate(TreeContext context, String source) {
         try {
             if (source != null) {
-                String target = "";
-                Boolean scanning = true;
-                while (scanning) {
-                    int start = source.indexOf("{{");
-                    int end = source.indexOf("}}");
-                    if ((start != -1) && (end != -1)) {
-                        target = target + source.substring(0, start);
-                        String variable = source.substring(start + 2, end);
+                String regex = "\\$\\{([^}]+)\\}";
+                Pattern pattern = Pattern.compile(regex);
 
-                        if (variable.indexOf(".$.") > 0) {  // Use JSONpath substitution
-                            JsonValue thisJV = context.getStateFor(this).get(variable.substring(0, variable.indexOf('.')));
+                int lastIndex = 0;
+                StringBuilder output = new StringBuilder();
+                Matcher matcher = pattern.matcher(source);
+                while (matcher.find()) {
+                    String found = hydrateVariable(context, matcher.group(1));
+                    output.append(source, lastIndex, matcher.start())
+                            .append(found);
 
-                            // If shared state value is stringified JSON then unescape it so it can be parsed
-                            String thisJVStr;
-                            if (thisJV.isString()) thisJVStr = thisJV.asString().replace("\\\"","");
-                            else thisJVStr = thisJV.toString();
-
-                            Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(thisJVStr);
-
-                            // Ignore (nullify) invalid JSON content
-                            try {
-
-                                Object val = JsonPath.read(document, variable.substring(variable.indexOf('.') + 1, variable.length()));
-                                if (val instanceof java.util.LinkedHashMap) {
-                                    JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
-                                    target += json.toString();
-                                } else if (val instanceof net.minidev.json.JSONArray) {
-                                    target += ((net.minidev.json.JSONArray)val).toJSONString();
-                                } else {
-                                    target += val.toString();
-                                }
-                            } catch (PathNotFoundException e) {
-                                logger.error(loggerPrefix + " " + e);
-                                target += "null";
-                            }
-
-                        } else { // Use simple string substitution
-                            JsonValue json = context.getStateFor(this).get(variable);
-                            if (json.isString()) target += context.getStateFor(this).get(variable).asString().replace("\\\"","");
-                            else target += context.getStateFor(this).get(variable).toString();
-                        }
-
-                        source = source.substring(end + 2, source.length());
-                    } else {
-                        target = target + source;
-                        scanning = false;
-                    }
+                    lastIndex = matcher.end();
                 }
-                return target;
+                if (lastIndex < source.length()) {
+                    output.append(source, lastIndex, source.length());
+                }
+                return output.toString();
             } else return "";
         } catch (NullPointerException | StringIndexOutOfBoundsException e) {
             return "";
         }
     }
+
 
     /**
      * Implementation of a certificate trustmanager to ignore invalid cert problems (wrong host, expired, etc)
