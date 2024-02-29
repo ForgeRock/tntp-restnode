@@ -26,6 +26,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
@@ -35,9 +36,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 import javax.net.ssl.KeyManager;
@@ -530,7 +531,7 @@ public class RESTNode implements Node {
         @Override
         public List<Outcome> getOutcomes(PreferredLocales locales, JsonValue nodeAttributes) {
 
-            List<Outcome> outcomes;
+            List<Outcome> outcomes = new ArrayList<>();
             ResourceBundle bundle = locales.getBundleInPreferredLocale(BUNDLE, RESTNode.class.getClassLoader());
 
             try {
@@ -540,17 +541,19 @@ public class RESTNode implements Node {
                         .map(choice -> new Outcome(choice, choice))
                         .collect(Collectors.toList());
             } catch (JsonValueException e) {
-                outcomes = emptyList();
+                outcomes =  new ArrayList<>();
             }
 
-            if (outcomes == null) outcomes = emptyList();
+            if (outcomes == null) outcomes = new ArrayList<>();
 
-            Map<String,Object> keys = nodeAttributes.get("jpToOutcomeMapper").required().asMap();
-            Set<String> keySet = keys.keySet();
-            for (Iterator<String> i = keySet.iterator(); i.hasNext();) {
-                String toSS = i.next();
-                outcomes.add(new Outcome(toSS, toSS));
-            }
+			if (nodeAttributes!= null && nodeAttributes.get("jpToOutcomeMapper")!=null &&  nodeAttributes.get("jpToOutcomeMapper").isNotNull()) {
+				Map<String, Object> keys = nodeAttributes.get("jpToOutcomeMapper").required().asMap();
+				Set<String> keySet = keys.keySet();
+				for (Iterator<String> i = keySet.iterator(); i.hasNext();) {
+					String toSS = i.next();
+					outcomes.add(new Outcome(toSS, toSS));
+				}
+			}
 
             outcomes.add(new Outcome(NOMATCHRESPONSE, bundle.getString("NoMatchOutcome")));
             outcomes.add(new Outcome(ERROR, bundle.getString("ErrorOutcome")));
