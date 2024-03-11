@@ -1,14 +1,14 @@
 /*
- * This code is to be used exclusively in connection with ForgeRock’s software or services. 
- * ForgeRock only offers ForgeRock software or services to legal entities who have entered 
- * into a binding license agreement with ForgeRock. 
+ * This code is to be used exclusively in connection with Ping Identity Corporation software or services. 
+ * Ping Identity Corporation only offers such software or services to legal entities who have entered into 
+ * a binding license agreement with Ping Identity Corporation.
+ *
+ * Copyright 2024 Ping Identity Corporation. All Rights Reserved
  */
 
 
 
 package org.forgerock.openam.auth.nodes;
-
-import static java.util.Collections.emptyList;
 
 import java.io.ByteArrayInputStream;
 import java.net.Socket;
@@ -309,7 +309,7 @@ public class RESTNode implements Node {
      */
     private String hydrateVariable(TreeContext context, String input) {
         if (input.indexOf(".$.") > 0) {  // Use JSONpath substitution
-            JsonValue thisJV = context.sharedState.get(input.substring(0, input.indexOf('.')));
+            JsonValue thisJV = context.getStateFor(this).get(input.substring(0, input.indexOf('.')));
 
             // If shared state value is stringified JSON then unescape it so it can be parsed
             String thisJVStr;
@@ -336,9 +336,9 @@ public class RESTNode implements Node {
             }
 
         } else { // Use simple string substitution
-            JsonValue json = context.sharedState.get(input);
-            if (json.isString()) return context.sharedState.get(input).asString().replace("\\\"","");
-            else return context.sharedState.get(input).toString();
+            JsonValue json = context.getStateFor(this).get(input);
+            if (json.isString()) return context.getStateFor(this).get(input).asString().replace("\\\"","");
+            else return context.getStateFor(this).get(input).toString();
         }
     }
 
@@ -463,7 +463,7 @@ public class RESTNode implements Node {
     /**
      * Call REST endpoint
      */
-	private HttpResponse callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String, String> headersMap, BodyType bodyType, String payload, int timeout) throws Exception {
+	private HttpResponse<String> callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String, String> headersMap, BodyType bodyType, String payload, int timeout) throws Exception {
 
 		HttpRequest.Builder requestBuilder;
 
