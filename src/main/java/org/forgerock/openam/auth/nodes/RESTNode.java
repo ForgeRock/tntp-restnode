@@ -216,7 +216,6 @@ public class RESTNode implements Node {
     }
 
 
-    //TODO JK - any reason not to throw the exception thrown in this method, instead of catching it and logging it here
     
     private void processResponse(TreeContext context, String responseBody) {
         NodeState nodeState = context.getStateFor(this);
@@ -231,9 +230,9 @@ public class RESTNode implements Node {
                 Object val = JsonPath.read(document, thisJPath);
                 if (val instanceof java.util.LinkedHashMap) {
                     JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
-                    nodeState.putShared(toSS, json);
+                    nodeState.putShared(toSS, json.toString());
                 } else if (val instanceof net.minidev.json.JSONArray) {
-                    nodeState.putShared(toSS,((net.minidev.json.JSONArray)val));
+                    nodeState.putShared(toSS,(((net.minidev.json.JSONArray)val).toString()));
                 } else {
                     nodeState.putShared(toSS, val);
                 }
