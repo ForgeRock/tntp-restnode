@@ -10,25 +10,13 @@
 
 package org.forgerock.openam.auth.nodes;
 
-import java.io.ByteArrayInputStream;
-import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.security.Key;
-import java.security.KeyFactory;
-import java.security.KeyStore;
-import java.security.SecureRandom;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateException;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
-import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -41,13 +29,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509ExtendedTrustManager;
 
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.JsonValueException;
@@ -58,6 +39,9 @@ import org.forgerock.openam.auth.node.api.NodeProcessException;
 import org.forgerock.openam.auth.node.api.NodeState;
 import org.forgerock.openam.auth.node.api.OutcomeProvider;
 import org.forgerock.openam.auth.node.api.TreeContext;
+import org.forgerock.openam.auth.nodes.HttpClientProviderUsingNode.HttpClientConfig;
+import org.forgerock.openam.sm.annotations.adapters.Password;
+import org.forgerock.openam.sm.annotations.adapters.TextArea;
 import org.forgerock.util.i18n.PreferredLocales;
 import org.json.JSONObject;
 import org.slf4j.Logger;
@@ -126,6 +110,7 @@ public class RESTNode implements Node {
         default String basicAuthnPassword() { return ""; }
 
         @Attribute(order = 500)
+        @TextArea
         default String payload() { return ""; }
 
         @Attribute(order = 55, validators = { RequiredValueValidator.class })
@@ -134,12 +119,18 @@ public class RESTNode implements Node {
         }
 
         @Attribute(order = 600)
+    	default TlsVersion protocol() {
+    		return TlsVersion.TLS1_3;
+    	}
+
+        @Attribute(order = 610)
         default boolean usemTLS() { return false; }
 
         @Attribute(order = 700)
         default String publicCert() { return "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"; }
 
         @Attribute(order = 800)
+        @Password
         default String privateKey() { return "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"; }
 
         @Attribute(order = 900)
@@ -185,8 +176,14 @@ public class RESTNode implements Node {
             String url = hydrate(context,(config.restURL() + getQueryString(context, config.queryParamsMap())));
             logger.debug(loggerPrefix + "Final URL: " + url);
 
-            // Create httpClient including mTLS certs and certificate checking if requested
-            HttpClient httpClient = getmTLShttpClient(config);
+            HttpClientConfig clientConfig = new HttpClientConfig();
+            clientConfig.setTimeout(config.timeout());
+            clientConfig.setProtocol(config.protocol().getProtocol());
+            clientConfig.setDisableCertChecks(config.disableCertChecks());
+            clientConfig.setUsemTLS(config.usemTLS());
+            clientConfig.setPublicCert(config.publicCert());
+            clientConfig.setPrivateKey(config.privateKey());
+            HttpClient httpClient = HttpClientProviderUsingNode.getInstance().getHttpClient(clientConfig);
 
             // Add request type, payload, timeouts, headers and send
             HttpResponse<String> response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
@@ -207,7 +204,7 @@ public class RESTNode implements Node {
 
         } catch (Exception ex) {
             String stackTrace = org.apache.commons.lang.exception.ExceptionUtils.getStackTrace(ex);
-            logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
+            logger.error(loggerPrefix + "Exception occurred: ", ex);
             context.getStateFor(this).putTransient(loggerPrefix + "Exception", ex.getMessage());
             context.getStateFor(this).putTransient(loggerPrefix + "StackTrace", stackTrace);
             return Action.goTo(ERROR).build();
@@ -370,96 +367,6 @@ public class RESTNode implements Node {
 
 
     /**
-     * Implementation of a certificate trustmanager to ignore invalid cert problems (wrong host, expired, etc)
-     */
-    private static final TrustManager insecureTrustManager = new X509ExtendedTrustManager() {
-        @Override
-        public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-            return new java.security.cert.X509Certificate[0];
-        }
-        @Override
-        public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException { }
-        @Override
-        public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException { }
-        @Override
-        public void checkServerTrusted(X509Certificate[] chain, String authType, SSLEngine engine) throws CertificateException { }
-        @Override
-        public void checkServerTrusted(X509Certificate[] chain, String authType, Socket socket) throws CertificateException { }
-        @Override
-        public void checkClientTrusted(X509Certificate[] chain, String authType, SSLEngine engine) throws CertificateException { }
-        @Override
-        public void checkClientTrusted(X509Certificate[] chain, String authType, Socket socket) throws CertificateException { }
-    };
-
-
-    private static String getRandomString() {
-        byte[] bytes = new byte[24];
-        SecureRandom random = new SecureRandom();
-        random.nextBytes(bytes);
-        return Base64.getEncoder().encodeToString(bytes);
-    }
-
-    /**
-     * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
-     */
-	private HttpClient getmTLShttpClient(Config config) throws Exception {
-
-		KeyManager[] keyManager = null;
-		TrustManager[] trustManager = null;
-		SSLParameters sslParam = new SSLParameters();
-
-		// parse certificate
-
-		if (config.usemTLS()) {
-
-			final byte[] publicData = config.publicCert().replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
-			final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
-
-			final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
-			final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(new ByteArrayInputStream(publicData));
-
-			logger.debug(loggerPrefix + "Successfully loaded the client cert certificate chain: " + String.join(" -> ", chain.stream().map(certificate -> {
-				if (certificate instanceof X509Certificate) {
-					final X509Certificate x509Cert = (X509Certificate) certificate;
-					return x509Cert.getSubjectDN().toString();
-				} else {
-					return certificate.getType();
-				}
-			}).collect(Collectors.toList())));
-
-			final Key key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateData));
-
-			// place cert+key into KeyStore
-			KeyStore clientKeyStore;
-			clientKeyStore = KeyStore.getInstance("jks"); // Replace with "bcfks" for FIPS compliant keystore
-
-			final char[] pwdChars = getRandomString().toCharArray();
-			clientKeyStore.load(null, null);
-			clientKeyStore.setKeyEntry("mtls-cert", key, pwdChars, chain.toArray(new Certificate[0]));
-
-			// initialize KeyManagerFactory
-			KeyManagerFactory keyMgrFactory = KeyManagerFactory.getInstance("SunX509");
-			keyMgrFactory.init(clientKeyStore, pwdChars);
-			keyManager = keyMgrFactory.getKeyManagers();
-
-			sslParam.setNeedClientAuth(true);
-		}
-
-		if (config.disableCertChecks()) {
-			trustManager = new TrustManager[] { insecureTrustManager };
-		}
-
-		// populate SSLContext with key manager
-		SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
-		sslCtx.init(keyManager, trustManager, null);
-
-		HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(config.timeout())).sslContext(sslCtx).sslParameters(sslParam).build();
-
-		return client;
-
-	}
-
-    /**
      * Call REST endpoint
      */
 	private HttpResponse<String> callREST(TreeContext context, RequestMode requestMode, HttpClient httpClient, String url, Map<String, String> headersMap, BodyType bodyType, String payload, int timeout) throws Exception {
@@ -561,5 +468,19 @@ public class RESTNode implements Node {
         }
     }
 
+    public enum TlsVersion {
+        TLS1_3("TLSv1.3"),
+        TLS1_2("TLSv1.2");
+    	
+    	  private final String protocol;
+
+    	  TlsVersion(String protocol) {
+            this.protocol = protocol;
+          }
+
+          public String getProtocol() {
+            return protocol;
+          }
+    }
 
 }
