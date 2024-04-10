@@ -225,20 +225,40 @@ public class RESTNode implements Node {
             String thisJPath = config.jpToSSMapper().get(toSS);
             try {
                 Object val = JsonPath.read(document, thisJPath);
-                if (val instanceof java.util.LinkedHashMap) {
-                    JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
-                    nodeState.putShared(toSS, json.toString());
-                } else if (val instanceof net.minidev.json.JSONArray) {
-                    nodeState.putShared(toSS,(((net.minidev.json.JSONArray)val).toString()));
-                } else {
-                    nodeState.putShared(toSS, val);
-                }
+                addToSSOrOA(nodeState, val, toSS);
             } catch (PathNotFoundException e) {
                 logger.error(loggerPrefix + " " + e);
             }
         }
     }
 
+    private void addToSSOrOA(NodeState ns, Object val, String toSS) {
+    	
+        if (val instanceof java.util.LinkedHashMap) {
+            JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
+            val = json.toString();
+        } else if (val instanceof net.minidev.json.JSONArray) {
+            val = ((net.minidev.json.JSONArray)val).toString();
+        }
+    	
+        if (toSS.toLowerCase().startsWith("objectattributes.")) {
+        	//then this is a objectAttributes modification
+            JsonValue objectAttributes = ns.get("objectAttributes");
+            
+            if (objectAttributes==null || objectAttributes.isNull()) {
+            	objectAttributes = new JsonValue(new LinkedHashMap<String, Object>(1));
+            }
+            toSS = toSS.replace("objectAttributes", "");
+            objectAttributes.put(toSS, val);
+        	ns.putShared("objectattributes", objectAttributes);
+        	
+        }
+        else {
+        	ns.putShared(toSS, val);
+        }
+    	
+    	
+    }
 
 
     /**
