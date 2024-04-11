@@ -248,7 +248,7 @@ public class RESTNode implements Node {
             if (objectAttributes==null || objectAttributes.isNull()) {
             	objectAttributes = new JsonValue(new LinkedHashMap<String, Object>(1));
             }
-            toSS = toSS.replace("objectAttributes", "");
+            toSS = toSS.replace("objectAttributes.", "");
             objectAttributes.put(toSS, val);
         	ns.putShared("objectattributes", objectAttributes);
         	
