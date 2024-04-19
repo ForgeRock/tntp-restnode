@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 
+import net.minidev.json.JSONArray;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.JsonValueException;
 import org.forgerock.openam.annotations.sm.Attribute;
@@ -238,7 +239,18 @@ public class RESTNode implements Node {
             JSONObject json = new JSONObject((LinkedHashMap<String, Object>) val);
             val = json.toString();
         } else if (val instanceof net.minidev.json.JSONArray) {
-            val = ((net.minidev.json.JSONArray)val).toString();
+            JSONArray jArray = (JSONArray) val;
+            // Convert JSONArray to ArrayList which can be naturally parsed in shared state by Scripted nodes.
+            // If array is singleton then return the value, otherwise return the array
+            if (jArray.size() == 1) val = jArray.get(0);
+            else {
+                ArrayList<Object> newArray = new ArrayList<Object>();
+                for (int i = 0; i < jArray.size(); i++) {
+                    Object item = (Object) jArray.get(i);
+                    newArray.add(item);
+                }
+                val = newArray;
+            }
         }
     	
         if (toSS.toLowerCase().startsWith("objectattributes.")) {
