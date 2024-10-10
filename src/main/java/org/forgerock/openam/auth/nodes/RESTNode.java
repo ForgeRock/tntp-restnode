@@ -186,7 +186,7 @@ public class RESTNode implements Node {
             logger.debug(loggerPrefix + "Final URL: " + url);
 
             // Create httpClient including mTLS certs and certificate checking if requested
-            HttpClient httpClient = getmTLShttpClient(config);
+            HttpClient httpClient = getmTLShttpClient(context, config);
 
             // Add request type, payload, timeouts, headers and send
             HttpResponse<String> response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
@@ -403,7 +403,7 @@ public class RESTNode implements Node {
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
      */
-	private HttpClient getmTLShttpClient(Config config) throws Exception {
+	private HttpClient getmTLShttpClient(TreeContext context, Config config) throws Exception {
 
 		KeyManager[] keyManager = null;
 		TrustManager[] trustManager = null;
@@ -413,8 +413,8 @@ public class RESTNode implements Node {
 
 		if (config.usemTLS()) {
 
-			final byte[] publicData = config.publicCert().replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
-			final byte[] privateData = Base64.getDecoder().decode(config.privateKey().replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
+			final byte[] publicData = hydrate(context, config.publicCert()).replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
+			final byte[] privateData = Base64.getDecoder().decode(hydrate(context, config.privateKey()).replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
 
 			final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
 			final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(new ByteArrayInputStream(publicData));
