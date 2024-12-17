@@ -128,7 +128,7 @@ public class RESTNode implements Node {
         @Attribute(order = 500)
         default String payload() { return ""; }
 
-        @Attribute(order = 55, validators = { RequiredValueValidator.class })
+        @Attribute(order = 550, validators = { RequiredValueValidator.class })
         default BodyType bodyType() {
             return BodyType.JSON;
         }
@@ -162,6 +162,9 @@ public class RESTNode implements Node {
 
         @Attribute(order = 1500)
         Map<String, String> jpToOutcomeMapper();
+
+        @Attribute(order = 1600)
+        default boolean logRequest() { return false; }
     }
 
 
@@ -183,7 +186,6 @@ public class RESTNode implements Node {
 
             // Construct URL with query parameters including variable substitution from sharedState
             String url = hydrate(context,(config.restURL() + getQueryString(context, config.queryParamsMap())));
-            logger.debug(loggerPrefix + "Final URL: " + url);
 
             // Create httpClient including mTLS certs and certificate checking if requested
             HttpClient httpClient = getmTLShttpClient(context, config);
@@ -516,9 +518,24 @@ public class RESTNode implements Node {
 
 		HttpRequest request = requestBuilder.uri(URI.create(url)).timeout(Duration.ofSeconds(timeout)).build();
 
-		HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-		logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
-		logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
+
+        // Generate cURL encoded version of request as debug and add to sharedState
+        String curlRequest = "curl --location --request " + request.method();
+        if (config.disableCertChecks()) curlRequest += " --insecure";
+        if (config.usemTLS()) curlRequest += " --cert [CERTIFICATE] --key [KEY]";
+        curlRequest += " '" + request.uri() + "'";
+        for (Map.Entry<String,List<String>> entry : request.headers().map().entrySet()) {
+            curlRequest += " -H '" + entry.getKey() + ": " + entry.getValue().get(0) + "'";
+        }
+        if (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE) curlRequest += " --data '" + payload + "'";
+        logger.debug(loggerPrefix + "cURL equivalent request: " + curlRequest);
+        if (config.logRequest()) context.getStateFor(this).putShared("cURL", curlRequest);
+
+
+        // Send request
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
+        logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
 
 		return response;
 

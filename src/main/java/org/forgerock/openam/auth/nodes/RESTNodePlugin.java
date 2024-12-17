@@ -24,7 +24,7 @@ public class RESTNodePlugin extends AbstractNodeAmPlugin {
 
     private final AnnotatedServiceRegistry serviceRegistry;
     static String currentVersion = "7.4.4";
-    static final String logAppender = "[Version: " + currentVersion + "][Marketplace]";
+    static final String logAppender = "[Version: " + currentVersion + "][Marketplace] ";
 
     /**
      * DI-enabled constructor.
