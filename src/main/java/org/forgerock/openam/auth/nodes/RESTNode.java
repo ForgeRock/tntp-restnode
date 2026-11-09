@@ -165,6 +165,9 @@ public class RESTNode implements Node {
 
         @Attribute(order = 1600)
         default boolean logRequest() { return false; }
+
+        @Attribute(order = 1700)
+        default boolean deleteRequestBody() { return false; }
     }
 
 
@@ -469,6 +472,9 @@ public class RESTNode implements Node {
 
 		HttpRequest.Builder requestBuilder;
 
+		// Whether a DELETE request should send the configured payload as its body
+		boolean sendBodyWithDelete = config.deleteRequestBody() && payload != null && !payload.isEmpty();
+
 		switch (requestMode) {
 		case POST:
 			requestBuilder = HttpRequest.newBuilder().POST(HttpRequest.BodyPublishers.ofString(payload));
@@ -477,7 +483,11 @@ public class RESTNode implements Node {
 			requestBuilder = HttpRequest.newBuilder().PUT(HttpRequest.BodyPublishers.ofString(payload));
 			break;
 		case DELETE:
-			requestBuilder = HttpRequest.newBuilder().DELETE();
+			if (sendBodyWithDelete) {
+				requestBuilder = HttpRequest.newBuilder().method("DELETE", HttpRequest.BodyPublishers.ofString(payload));
+			} else {
+				requestBuilder = HttpRequest.newBuilder().DELETE();
+			}
 			break;
 		case PATCH:
 			requestBuilder = HttpRequest.newBuilder().method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
@@ -518,7 +528,6 @@ public class RESTNode implements Node {
 
 		HttpRequest request = requestBuilder.uri(URI.create(url)).timeout(Duration.ofSeconds(timeout)).build();
 
-
         // Generate cURL encoded version of request as debug and add to sharedState
         String curlRequest = "curl --location --request " + request.method();
         if (config.disableCertChecks()) curlRequest += " --insecure";
@@ -527,7 +536,7 @@ public class RESTNode implements Node {
         for (Map.Entry<String,List<String>> entry : request.headers().map().entrySet()) {
             curlRequest += " -H '" + entry.getKey() + ": " + entry.getValue().get(0) + "'";
         }
-        if (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE) curlRequest += " --data '" + payload + "'";
+        if (sendBodyWithDelete || (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE)) curlRequest += " --data '" + payload + "'";
         logger.debug(loggerPrefix + "cURL equivalent request: " + curlRequest);
         if (config.logRequest()) context.getStateFor(this).putShared("cURL", curlRequest);
 
