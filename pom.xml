@@ -14,7 +14,7 @@
 
 
 	<groupId>org.forgerock.am</groupId>
-	<version>8.0.2-SNAPSHOT</version>
+	<version>8.0.1-triage-38769</version>
 	<modelVersion>4.0.0</modelVersion>
 	<artifactId>http-client</artifactId>
 	<name>HTTP Client</name>
