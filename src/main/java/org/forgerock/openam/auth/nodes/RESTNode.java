@@ -80,6 +80,23 @@ public class RESTNode implements Node {
     private String loggerPrefix = "[RESTNode]" + RESTNodePlugin.logAppender;
 
     private final Config config;
+
+    // Client reuse (TRIAGE-38769): building a new HttpClient per process() invocation creates a
+    // selector thread, connection pool and SSL context per authentication attempt, and discarded
+    // clients are only reclaimed by GC, so under sustained traffic selector threads, TLS material
+    // and idle sockets accumulate and drive heap growth and GC pressure. Node configuration is
+    // fixed per node instance; only the hydrated mTLS certificate material can differ between
+    // requests, so clients are cached against that material and reused. The LRU bound keeps the
+    // cache small even for configurations that vary certificates per request.
+    private static final int HTTP_CLIENT_CACHE_LIMIT = 16;
+    private final Map<String, HttpClient> httpClientCache = Collections.synchronizedMap(
+            new LinkedHashMap<String, HttpClient>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, HttpClient> eldest) {
+                    return size() > HTTP_CLIENT_CACHE_LIMIT;
+                }
+            });
+
     private static final String BUNDLE = RESTNode.class.getName();
 
     private static final String NOMATCHRESPONSE = "NOMATCHRESPONSE";
@@ -404,8 +421,28 @@ public class RESTNode implements Node {
 
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
+     *
+     * Clients are cached per node instance, keyed on the hydrated mTLS certificate material (the
+     * only per-request variable), and reused across invocations to avoid building a new
+     * HttpClient — with its selector thread, connection pool and SSL context — per request.
+     * See TRIAGE-38769.
      */
 	private HttpClient getmTLShttpClient(TreeContext context, Config config) throws Exception {
+
+		// Only the hydrated certificate material varies between requests for a given node
+		// configuration; everything else that feeds client construction is fixed per instance.
+		String cacheKey = config.usemTLS()
+				? hydrate(context, config.publicCert()) + "|" + hydrate(context, config.privateKey())
+						+ "|disableCertChecks=" + config.disableCertChecks()
+				: "no-mtls|disableCertChecks=" + config.disableCertChecks();
+
+		HttpClient cachedClient = httpClientCache.get(cacheKey);
+		if (cachedClient != null) {
+			logger.debug(loggerPrefix + "Reusing cached HttpClient");
+			return cachedClient;
+		}
+
+		logger.debug(loggerPrefix + "Building new HttpClient");
 
 		KeyManager[] keyManager = null;
 		TrustManager[] trustManager = null;
@@ -457,6 +494,8 @@ public class RESTNode implements Node {
 		sslCtx.init(keyManager, trustManager, null);
 
 		HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(config.timeout())).sslContext(sslCtx).sslParameters(sslParam).build();
+
+		httpClientCache.put(cacheKey, client);
 
 		return client;
 
