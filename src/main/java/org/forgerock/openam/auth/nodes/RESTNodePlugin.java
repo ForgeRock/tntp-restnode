@@ -23,7 +23,7 @@ import static java.util.Arrays.asList;
 public class RESTNodePlugin extends AbstractNodeAmPlugin {
 
     private final AnnotatedServiceRegistry serviceRegistry;
-    static String currentVersion = "8.0.1";
+    static String currentVersion = "8.1.0";
     static final String logAppender = "[Version: " + currentVersion + "][Marketplace] ";
 
     /**
@@ -56,7 +56,8 @@ public class RESTNodePlugin extends AbstractNodeAmPlugin {
     @Override
     protected Iterable<? extends Class<? extends Node>> getNodes() {
         return asList(
-                RESTNode.class
+                RESTNode.class,
+                RESTNodeV2.class
         );
     }
 }
