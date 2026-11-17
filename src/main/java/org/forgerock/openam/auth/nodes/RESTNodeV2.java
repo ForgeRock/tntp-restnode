@@ -11,14 +11,19 @@
 package org.forgerock.openam.auth.nodes;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.security.Key;
 import java.security.KeyFactory;
 import java.security.KeyStore;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -49,6 +54,7 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509ExtendedTrustManager;
 
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.JsonValueException;
 import org.forgerock.openam.annotations.sm.Attribute;
@@ -77,8 +83,8 @@ import com.sun.identity.sm.RequiredValueValidator;
 @Node.VersionMetadata(name = "RESTNode", version = 2)
 public class RESTNodeV2 implements Node {
 
-    private final Logger logger = LoggerFactory.getLogger(RESTNodeV2.class);
-    private String loggerPrefix = "[RESTNodeV2]" + RESTNodePlugin.logAppender;
+    private static final Logger logger = LoggerFactory.getLogger(RESTNodeV2.class);
+    private static final String loggerPrefix = "[RESTNodeV2]" + RESTNodePlugin.logAppender;
 
     private final Config config;
     private static final String BUNDLE = RESTNodeV2.class.getName();
@@ -86,11 +92,27 @@ public class RESTNodeV2 implements Node {
     private static final String NOMATCHRESPONSE = "NOMATCHRESPONSE";
     private static final String ERROR = "ERROR";
 
-    // Cached HttpClient for the (overwhelmingly common) static TLS config. Rebuilt never —
-    // config is immutable per node instance. Dynamic per-request certs bypass the cache and
-    // get a fresh client that the caller closes deterministically after the call.
-    private final Object clientLock = new Object();
-    private HttpClient cachedClient;
+    // AM builds a new node instance for every evaluation (AuthTreeExecutor -> AuthNodeFactory.createNode),
+    // so an HttpClient held in an instance field would still be rebuilt on every request. Clients are
+    // cached per class instead, keyed by everything that shapes a client (mTLS material, trust mode,
+    // connect timeout), and shared by every RESTNodeV2 with the same settings. The cache is a bounded
+    // LRU guarded by its own monitor; evicted clients are shut down.
+    static final int MAX_CACHED_CLIENTS = 32;
+
+    // HttpClient.shutdown() exists from JDK 21 (the AIC runtime). Looked up reflectively so the node
+    // still runs on JDK 17, where an evicted client is left to the garbage collector instead.
+    private static final Method HTTP_CLIENT_SHUTDOWN = findShutdownMethod();
+
+    private static final Map<String, HttpClient> CLIENT_CACHE = new LinkedHashMap<String, HttpClient>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, HttpClient> eldest) {
+            if (size() > MAX_CACHED_CLIENTS) {
+                shutdownQuietly(eldest.getValue());
+                return true;
+            }
+            return false;
+        }
+    };
 
     public enum RequestMode {
         GET, POST, PUT, DELETE, PATCH, HEAD
@@ -195,20 +217,11 @@ public class RESTNodeV2 implements Node {
             // Construct URL with query parameters including variable substitution from sharedState
             url = hydrate(context,(config.restURL() + getQueryString(context, config.queryParamsMap())));
 
-            // Get an httpClient: reused when the TLS config is unchanged, fresh (and
-            // deterministically closed after the call) when certs are hydrated per request
-            HttpResponse<String> response;
-            HttpClient client = getCachedHttpClient(context);
-            if (client != null) {
-                response = callREST(context, config.requestMode(), client, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
-            } else {
-                HttpClient perRequestClient = getmTLShttpClient(context, config);
-                try {
-                    response = callREST(context, config.requestMode(), perRequestClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
-                } finally {
-                    closeQuietly(perRequestClient);
-                }
-            }
+            // Shared httpClient for this node's TLS settings (mTLS certs, certificate checking, connect timeout)
+            HttpClient httpClient = getHttpClient(context);
+
+            // Add request type, payload, timeouts, headers and send
+            HttpResponse<String> response = callREST(context, config.requestMode(), httpClient, url, config.headersMap(), config.bodyType(), hydrate(context,config.payload()), config.timeout());
 
             if (response == null) {
                 context.getStateFor(this).putShared("DebugResponse","ERROR");
@@ -225,60 +238,119 @@ public class RESTNodeV2 implements Node {
             }
 
         } catch (Exception ex) {
-            // Transient connect/request timeouts are expected under load: log one line and keep
-            // stack traces at DEBUG so a timeout surge cannot stall the stdout audit pipe.
-            if (ex instanceof java.net.http.HttpConnectTimeoutException || ex instanceof java.net.http.HttpTimeoutException) {
-                logger.warn(loggerPrefix + "Request timeout on " + url + ": " + ex.getMessage());
-                logger.debug(loggerPrefix + "Timeout stack trace", ex);
+            if (ex instanceof IOException) {
+                // Network failures (connect/request timeouts, refused or reset connections, TLS handshake
+                // failures) are expected under load or during an outage: log one line and keep the stack
+                // trace at DEBUG so a failure surge cannot stall the stdout pipe (TRIAGE-38713).
+                logger.warn(loggerPrefix + "Request to " + describeTarget(url) + " failed: " + ex);
+                logger.debug(loggerPrefix + "Request failure stack trace", ex);
             } else {
-                String stackTrace = org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace(ex);
-                logger.error(loggerPrefix + "Exception occurred: " + stackTrace);
+                logger.error(loggerPrefix + "Exception occurred", ex);
             }
-            context.getStateFor(this).putShared(loggerPrefix + "Exception", ex.getMessage());
+            NodeState nodeState = context.getStateFor(this);
+            nodeState.putShared(loggerPrefix + "Exception", ex.getMessage());
+            if (config.logRequest()) {
+                nodeState.putShared(loggerPrefix + "StackTrace", ExceptionUtils.getStackTrace(ex));
+            }
             return Action.goTo(ERROR).build();
         }
 
     }
 
-    private void closeQuietly(HttpClient client) {
-        // HttpClient is AutoCloseable from JDK 21 (AIC runtime); this still compiles on 11.
-        if (client instanceof AutoCloseable) {
+    /**
+     * Return the shared HttpClient for this node's TLS settings, building it on first use. mTLS material
+     * hydrated from sharedState is part of the cache key, so per-request certs are reused while they repeat.
+     */
+    private HttpClient getHttpClient(TreeContext context) throws Exception {
+        String publicCert = null;
+        String privateKey = null;
+        if (config.usemTLS()) {
+            publicCert = hydrate(context, config.publicCert());
+            privateKey = hydrate(context, config.privateKey());
+        }
+        String key = clientCacheKey(config.usemTLS(), publicCert, privateKey, config.disableCertChecks(), config.timeout());
+        synchronized (CLIENT_CACHE) {
+            HttpClient client = CLIENT_CACHE.get(key);
+            if (client == null) {
+                // Built under the lock so a burst of first requests creates one client, not one each
+                client = getmTLShttpClient(publicCert, privateKey);
+                CLIENT_CACHE.put(key, client);
+            }
+            return client;
+        }
+    }
+
+    /**
+     * Cache key covering every input that shapes an HttpClient. The mTLS cert and key enter as a SHA-256
+     * digest so the cache does not hold another copy of the private key.
+     */
+    static String clientCacheKey(boolean usemTLS, String publicCert, String privateKey, boolean disableCertChecks, int connectTimeoutSeconds) {
+        StringBuilder key = new StringBuilder()
+                .append("mtls=").append(usemTLS)
+                .append("|insecure=").append(disableCertChecks)
+                .append("|connectTimeout=").append(connectTimeoutSeconds);
+        if (usemTLS) {
             try {
-                ((AutoCloseable) client).close();
-            } catch (Exception e) {
-                logger.debug(loggerPrefix + "Failed to close HttpClient", e);
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                digest.update(String.valueOf(publicCert).getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                digest.update(String.valueOf(privateKey).getBytes(StandardCharsets.UTF_8));
+                key.append("|material=").append(Base64.getEncoder().encodeToString(digest.digest()));
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 is not available", e); // required on every JDK
             }
+        }
+        return key.toString();
+    }
+
+    private static Method findShutdownMethod() {
+        try {
+            return HttpClient.class.getMethod("shutdown");
+        } catch (NoSuchMethodException e) {
+            return null; // JDK 17
         }
     }
 
     /**
-     * Return a reusable HttpClient when the TLS configuration is static, or null when
-     * per-request cert hydration means a fresh client must be built and closed by the caller.
+     * Orderly, non-blocking shutdown: requests already in flight on the client run to completion.
      */
-    private HttpClient getCachedHttpClient(TreeContext context) throws Exception {
-        if (usesDynamicCerts()) {
-            return null;
+    private static void shutdownQuietly(HttpClient client) {
+        if (HTTP_CLIENT_SHUTDOWN == null) {
+            return;
         }
-        synchronized (clientLock) {
-            if (cachedClient == null) {
-                cachedClient = getmTLShttpClient(context, config);
-            }
-            return cachedClient;
+        try {
+            HTTP_CLIENT_SHUTDOWN.invoke(client);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            logger.debug(loggerPrefix + "Failed to shut down evicted HttpClient", e);
+        }
+    }
+
+    static int cachedClientCount() {
+        synchronized (CLIENT_CACHE) {
+            return CLIENT_CACHE.size();
+        }
+    }
+
+    static void clearClientCache() {
+        synchronized (CLIENT_CACHE) {
+            CLIENT_CACHE.values().forEach(RESTNodeV2::shutdownQuietly);
+            CLIENT_CACHE.clear();
         }
     }
 
     /**
-     * Certs are per-request only when mTLS is enabled and the configured cert/key strings
-     * carry ${...} placeholders hydrated from sharedState. Config attributes are otherwise
-     * immutable for the lifetime of this node instance, so the built client never changes.
+     * Scheme, host and port only: the hydrated URL can carry user data from shared state in its path or query.
      */
-    private boolean usesDynamicCerts() {
-        return config.usemTLS()
-                && (containsPlaceholder(config.publicCert()) || containsPlaceholder(config.privateKey()));
-    }
-
-    private static boolean containsPlaceholder(String s) {
-        return s != null && s.contains("${");
+    private static String describeTarget(String url) {
+        try {
+            URI uri = URI.create(url);
+            if (uri.getHost() == null) {
+                return "<unknown host>";
+            }
+            return uri.getScheme() + "://" + uri.getHost() + (uri.getPort() == -1 ? "" : ":" + uri.getPort());
+        } catch (RuntimeException e) {
+            return "<unparseable URL>";
+        }
     }
 
 
@@ -469,8 +541,9 @@ public class RESTNodeV2 implements Node {
 
     /**
      * Create httpClient with suitable config for mTLS, certs, ignore certs, etc.
+     * publicCert and privateKey are already hydrated, and null when mTLS is off.
      */
-	private HttpClient getmTLShttpClient(TreeContext context, Config config) throws Exception {
+	private HttpClient getmTLShttpClient(String publicCert, String privateKey) throws Exception {
 
 		KeyManager[] keyManager = null;
 		TrustManager[] trustManager = null;
@@ -480,8 +553,8 @@ public class RESTNodeV2 implements Node {
 
 		if (config.usemTLS()) {
 
-			final byte[] publicData = hydrate(context, config.publicCert()).replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
-			final byte[] privateData = Base64.getDecoder().decode(hydrate(context, config.privateKey()).replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
+			final byte[] publicData = publicCert.replaceAll(" ", "\n").replaceAll("\nCERTIFICATE", " CERTIFICATE").getBytes();
+			final byte[] privateData = Base64.getDecoder().decode(privateKey.replaceAll("-----BEGIN PRIVATE KEY-----", "").replaceAll("-----END PRIVATE KEY-----", "").replaceAll("\\s", ""));
 
 			final CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
 			final Collection<? extends Certificate> chain = certificateFactory.generateCertificates(new ByteArrayInputStream(publicData));
@@ -521,7 +594,15 @@ public class RESTNodeV2 implements Node {
 		SSLContext sslCtx = SSLContext.getInstance("TLSv1.2");
 		sslCtx.init(keyManager, trustManager, null);
 
-		HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(config.timeout())).sslContext(sslCtx).sslParameters(sslParam).build();
+		// HTTP/1.1 because the client is shared. Over HTTP/2 all concurrent requests to a host become streams
+		// on one connection, and once the server's stream limit is reached the JDK fails new requests with
+		// "too many concurrent streams" instead of opening another connection. HTTP/1.1 pools connections.
+		HttpClient client = HttpClient.newBuilder()
+				.version(HttpClient.Version.HTTP_1_1)
+				.connectTimeout(Duration.ofSeconds(config.timeout()))
+				.sslContext(sslCtx)
+				.sslParameters(sslParam)
+				.build();
 
 		return client;
 
@@ -592,7 +673,9 @@ public class RESTNodeV2 implements Node {
             if (config.usemTLS()) curlRequest += " --cert [CERTIFICATE] --key [KEY]";
             curlRequest += " '" + request.uri() + "'";
             for (Map.Entry<String,List<String>> entry : request.headers().map().entrySet()) {
-                curlRequest += " -H '" + entry.getKey() + ": " + entry.getValue().get(0) + "'";
+                // Credentials stay out of debug logs and shared state, like the mTLS cert and key above
+                String value = isCredentialHeader(entry.getKey()) ? "[REDACTED]" : entry.getValue().get(0);
+                curlRequest += " -H '" + entry.getKey() + ": " + value + "'";
             }
             if (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE) curlRequest += " --data '" + payload + "'";
             logger.debug(loggerPrefix + "cURL equivalent request: " + curlRequest);
@@ -608,6 +691,10 @@ public class RESTNodeV2 implements Node {
 		return response;
 
 	}
+
+    private static boolean isCredentialHeader(String name) {
+        return "authorization".equalsIgnoreCase(name) || "proxy-authorization".equalsIgnoreCase(name);
+    }
 
     /**
      * Populate node outcomes based on configuration options
