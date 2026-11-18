@@ -23,7 +23,7 @@ import static java.util.Arrays.asList;
 public class RESTNodePlugin extends AbstractNodeAmPlugin {
 
     private final AnnotatedServiceRegistry serviceRegistry;
-    static String currentVersion = "8.1.1";
+    static String currentVersion = "8.1.2";
     static final String logAppender = "[Version: " + currentVersion + "][Marketplace] ";
 
     /**
@@ -50,6 +50,11 @@ public class RESTNodePlugin extends AbstractNodeAmPlugin {
     @Override
     public void upgrade(String fromVersion) throws PluginException {
         pluginTools.upgradeAuthNode(RESTNode.class);
+        // Version 2 of the node was added in 8.1.0. Where it is already installed, its schema is replaced so that new
+        // settings appear: installAuthNode, called by super.upgrade, skips a node that is already installed.
+        if (inRange("8.1.0", fromVersion, currentVersion)) {
+            pluginTools.upgradeAuthNode(RESTNodeV2.class);
+        }
         super.upgrade(fromVersion);
     }
 

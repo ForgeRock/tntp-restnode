@@ -193,6 +193,9 @@ public class RESTNodeV2 implements Node {
 
         @Attribute(order = 1600)
         default boolean logRequest() { return false; }
+
+        @Attribute(order = 1700)
+        default boolean deleteRequestBody() { return false; }
     }
 
 
@@ -669,6 +672,9 @@ public class RESTNodeV2 implements Node {
 
 		HttpRequest.Builder requestBuilder;
 
+		// Whether a DELETE request should send the configured payload as its body
+		boolean sendBodyWithDelete = config.deleteRequestBody() && payload != null && !payload.isEmpty();
+
 		switch (requestMode) {
 		case POST:
 			requestBuilder = HttpRequest.newBuilder().POST(HttpRequest.BodyPublishers.ofString(payload));
@@ -677,7 +683,11 @@ public class RESTNodeV2 implements Node {
 			requestBuilder = HttpRequest.newBuilder().PUT(HttpRequest.BodyPublishers.ofString(payload));
 			break;
 		case DELETE:
-			requestBuilder = HttpRequest.newBuilder().DELETE();
+			if (sendBodyWithDelete) {
+				requestBuilder = HttpRequest.newBuilder().method("DELETE", HttpRequest.BodyPublishers.ofString(payload));
+			} else {
+				requestBuilder = HttpRequest.newBuilder().DELETE();
+			}
 			break;
 		case PATCH:
 			requestBuilder = HttpRequest.newBuilder().method("PATCH", HttpRequest.BodyPublishers.ofString(payload));
@@ -731,7 +741,7 @@ public class RESTNodeV2 implements Node {
                 String value = isCredentialHeader(entry.getKey()) ? "[REDACTED]" : entry.getValue().get(0);
                 curlRequest += " -H '" + entry.getKey() + ": " + value + "'";
             }
-            if (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE) curlRequest += " --data '" + payload + "'";
+            if (sendBodyWithDelete || (requestMode != RequestMode.GET && requestMode != RequestMode.DELETE)) curlRequest += " --data '" + payload + "'";
             logger.debug(loggerPrefix + "cURL equivalent request: " + curlRequest);
             if (config.logRequest()) context.getStateFor(this).putShared("cURL", curlRequest);
         }
@@ -808,9 +818,9 @@ public class RESTNodeV2 implements Node {
     }
 
     /**
-     * Version 2 has the same settings as version 1, but AM leaves a setting with no stored value out of a node's
-     * configuration, and after an update the journey editor reports every setting missing from the upgraded
-     * configuration as a missing required value. Each missing setting is filled in with its default.
+     * AM leaves a setting with no stored value out of a node's configuration, and a version 1 node from a build without
+     * Send Body with DELETE has no such setting at all. After an update the journey editor reports every setting
+     * missing from the upgraded configuration as a missing required value, so each one is filled in with its default.
      */
     @NodeVersionUpgrader.UpgraderMetadata(version = 2, previousUpgrader = NoUpgrades.class)
     public static class RESTNodeV2Upgrader implements NodeVersionUpgrader {
@@ -849,6 +859,7 @@ public class RESTNodeV2 implements Node {
             putIfMissing(config, "jpToSSMapper", new LinkedHashMap<>(DEFAULTS.jpToSSMapper()));
             putIfMissing(config, "jpToOutcomeMapper", new LinkedHashMap<>(DEFAULTS.jpToOutcomeMapper()));
             putIfMissing(config, "logRequest", DEFAULTS.logRequest());
+            putIfMissing(config, "deleteRequestBody", DEFAULTS.deleteRequestBody());
             return config;
         }
 

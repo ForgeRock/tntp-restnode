@@ -42,6 +42,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.forgerock.json.JsonValue;
@@ -76,6 +77,8 @@ class HttpClientReuseTest {
     private static String url;
     private static String[] identityA;
     private static String[] identityB;
+    private static final AtomicReference<String> recordedMethod = new AtomicReference<>();
+    private static final AtomicReference<String> recordedBody = new AtomicReference<>();
 
     @BeforeAll
     static void setUp() throws Exception {
@@ -84,6 +87,11 @@ class HttpClientReuseTest {
         server.createContext("/bad-gateway", ex -> respond(ex, 502, "<html><body><h1>502 Bad Gateway</h1></body></html>"));
         server.createContext("/unavailable", ex -> respond(ex, 503, ""));
         server.createContext("/failed", ex -> respond(ex, 200, "[{\"status\":\"failed\"}]"));
+        server.createContext("/record", ex -> {
+            recordedMethod.set(ex.getRequestMethod());
+            recordedBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(ex, 200, "{}");
+        });
         server.start();
         baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
         url = baseUrl + "/echo";
@@ -333,6 +341,33 @@ class HttpClientReuseTest {
     }
 
     @Test
+    void v2SendsBodyWithDeleteOnlyWhenEnabled() throws Exception {
+        TestConfig delete = new TestConfig();
+        delete.restURL = baseUrl + "/record";
+        delete.requestMode = RESTNodeV2.RequestMode.DELETE;
+        delete.payload = "{\"id\":42}";
+        delete.logRequest = true;
+
+        TreeContext withoutBody = context();
+        assertEquals("2xx", new RESTNodeV2(delete).process(withoutBody).outcome);
+        assertEquals("DELETE", recordedMethod.get());
+        assertEquals("", recordedBody.get());
+        assertFalse(withoutBody.sharedState.get("cURL").asString().contains("--data"));
+
+        delete.deleteRequestBody = true;
+        TreeContext withBody = context();
+        assertEquals("2xx", new RESTNodeV2(delete).process(withBody).outcome);
+        assertEquals("DELETE", recordedMethod.get());
+        assertEquals("{\"id\":42}", recordedBody.get());
+        assertTrue(withBody.sharedState.get("cURL").asString().contains("--data '{\"id\":42}'"));
+
+        // Enabled with no body content: a plain DELETE
+        delete.payload = "";
+        assertEquals("2xx", new RESTNodeV2(delete).process(context()).outcome);
+        assertEquals("", recordedBody.get());
+    }
+
+    @Test
     void upgraderIsDeclaredForVersion2() {
         assertEquals(RESTNodeV2.RESTNodeV2Upgrader.class, RESTNodeV2.class.getAnnotation(Node.VersionMetadata.class).upgrader());
 
@@ -369,6 +404,18 @@ class HttpClientReuseTest {
         assertEquals("JSON", v2.get("bodyType").asString());
         assertEquals(Map.of(), v2.get("jpToOutcomeMapper").asMap());
         assertFalse(v2.get("logRequest").asBoolean());
+        assertFalse(v2.get("deleteRequestBody").asBoolean());
+    }
+
+    @Test
+    void upgraderKeepsSendBodyWithDeleteFromAVersion1Config() throws Exception {
+        // Version 1 nodes from builds that have the setting already store it
+        JsonValue v1 = JsonValue.json(JsonValue.object(
+                JsonValue.field("restURL", "https://api.example.com/users/42"),
+                JsonValue.field("requestMode", "DELETE"),
+                JsonValue.field("deleteRequestBody", true)));
+
+        assertTrue(new RESTNodeV2.RESTNodeV2Upgrader().upgrade(v1).get("deleteRequestBody").asBoolean());
     }
 
     @Test
@@ -403,6 +450,7 @@ class HttpClientReuseTest {
         int timeout = 30;
         boolean basicAuthn;
         boolean logRequest;
+        boolean deleteRequestBody;
         List<String> responseCodes = List.of("2xx");
         Map<String, String> jpToSSMapper = Map.of();
         Map<String, String> jpToOutcomeMapper = Map.of();
@@ -419,6 +467,7 @@ class HttpClientReuseTest {
         public String basicAuthnUsername() { return "alice"; }
         public String basicAuthnPassword() { return "s3cret"; }
         public boolean logRequest() { return logRequest; }
+        public boolean deleteRequestBody() { return deleteRequestBody; }
         public List<String> responseCodes() { return responseCodes; }
         public Map<String, String> jpToSSMapper() { return jpToSSMapper; }
         public Map<String, String> jpToOutcomeMapper() { return jpToOutcomeMapper; }
