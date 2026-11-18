@@ -22,6 +22,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -57,6 +59,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import com.sun.net.httpserver.HttpServer;
 
@@ -256,18 +260,74 @@ class HttpClientReuseTest {
         assertSame(client, cache.get("a", () -> client));
     }
 
+    /**
+     * The server closes a pooled connection without answering, as if its idle timeout had just expired. The JDK
+     * retries GET itself; the node retries PUT and DELETE, and POST and PATCH only when Retry POST and PATCH is on.
+     */
+    @ParameterizedTest(name = "{0}, retryPostAndPatch={1}")
+    @CsvSource({
+            "GET,    false, 2xx,   3",
+            "PUT,    false, 2xx,   3",
+            "DELETE, false, 2xx,   3",
+            "POST,   false, ERROR, 2",
+            "PATCH,  false, ERROR, 2",
+            "POST,   true,  2xx,   3",
+            "PATCH,  true,  2xx,   3"
+    })
+    void v2RetriesAClosedPooledConnectionOnlyWhenSafeToRepeat(RESTNodeV2.RequestMode method, boolean retryPostAndPatch,
+            String outcome, int requests) throws Exception {
+        String path = "/stale/" + method + "-" + retryPostAndPatch;
+        TestConfig config = retryConfig(path, method, retryPostAndPatch);
+
+        assertEquals("2xx", new RESTNodeV2(config).process(context()).outcome); // leaves a pooled connection
+        assertEquals(outcome, new RESTNodeV2(config).process(context()).outcome);
+
+        assertEquals(requests, rawServer.requests(path), "requests the server received");
+    }
+
+    /**
+     * The server reads the request on a new connection and closes it without answering, as if it processed the
+     * request and the reply was lost. The JDK reports this exactly as it reports a pooled connection closed as idle,
+     * so sending the request again can deliver it twice: only PUT and DELETE are sent again unless the node allows it.
+     */
+    @ParameterizedTest(name = "{0}, retryPostAndPatch={1}")
+    @CsvSource({
+            "PUT,    false, 2xx,   2",
+            "DELETE, false, 2xx,   2",
+            "POST,   false, ERROR, 1",
+            "PATCH,  false, ERROR, 1",
+            "POST,   true,  2xx,   2",
+            "PATCH,  true,  2xx,   2"
+    })
+    void v2RepeatsARequestWhoseReplyWasLostOnlyWhenSafeToRepeat(RESTNodeV2.RequestMode method, boolean retryPostAndPatch,
+            String outcome, int requests) throws Exception {
+        String path = "/lost-reply/" + method + "-" + retryPostAndPatch;
+        TestConfig config = retryConfig(path, method, retryPostAndPatch);
+
+        assertEquals(outcome, new RESTNodeV2(config).process(context()).outcome);
+
+        assertEquals(requests, rawServer.requests(path), "requests the server received");
+    }
+
+    /**
+     * Once the timeout has passed a retry could only time out, possibly after delivering the request again. Failures
+     * other than a connection closed before a response, such as a timeout, are never retried.
+     */
     @Test
-    void v2RetriesOnceWhenServerClosedAReusedConnection() throws Exception {
-        TestConfig post = new TestConfig();
-        post.restURL = rawServer.url("/stale");
-        post.requestMode = RESTNodeV2.RequestMode.POST;
-        post.payload = "{\"a\":1}";
+    void v2RetriesOnlyAConnectionClosedBeforeAResponseAndOnlyBeforeTheTimeout() {
+        HttpRequest put = HttpRequest.newBuilder(URI.create(rawServer.url("/lost-reply/probe")))
+                .PUT(HttpRequest.BodyPublishers.ofString("{}"))
+                .build();
+        HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+        IOException closed = assertThrows(IOException.class, () -> client.send(put, HttpResponse.BodyHandlers.discarding()));
+        long beforeTimeout = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        long afterTimeout = System.nanoTime() - 1;
 
-        assertEquals("2xx", new RESTNodeV2(post).process(context()).outcome); // leaves a pooled connection
-        // The server closes that connection without answering, as if its idle timeout had just expired
-        assertEquals("2xx", new RESTNodeV2(post).process(context()).outcome);
-
-        assertEquals(3, rawServer.staleRequests.get(), "first call, closed reuse, retry on a new connection");
+        assertTrue(RESTNodeV2.shouldRetry(RESTNodeV2.RequestMode.PUT, false, closed, beforeTimeout), closed.toString());
+        assertFalse(RESTNodeV2.shouldRetry(RESTNodeV2.RequestMode.PUT, false, closed, afterTimeout));
+        assertFalse(RESTNodeV2.shouldRetry(RESTNodeV2.RequestMode.POST, true, closed, afterTimeout));
+        assertFalse(RESTNodeV2.shouldRetry(RESTNodeV2.RequestMode.PUT, false,
+                new HttpTimeoutException("request timed out"), beforeTimeout));
     }
 
     @Test
@@ -405,6 +465,7 @@ class HttpClientReuseTest {
         assertEquals(Map.of(), v2.get("jpToOutcomeMapper").asMap());
         assertFalse(v2.get("logRequest").asBoolean());
         assertFalse(v2.get("deleteRequestBody").asBoolean());
+        assertFalse(v2.get("retryPostAndPatch").asBoolean(), "version 1 never sent a request twice");
     }
 
     @Test
@@ -451,6 +512,7 @@ class HttpClientReuseTest {
         boolean basicAuthn;
         boolean logRequest;
         boolean deleteRequestBody;
+        boolean retryPostAndPatch;
         List<String> responseCodes = List.of("2xx");
         Map<String, String> jpToSSMapper = Map.of();
         Map<String, String> jpToOutcomeMapper = Map.of();
@@ -468,9 +530,20 @@ class HttpClientReuseTest {
         public String basicAuthnPassword() { return "s3cret"; }
         public boolean logRequest() { return logRequest; }
         public boolean deleteRequestBody() { return deleteRequestBody; }
+        public boolean retryPostAndPatch() { return retryPostAndPatch; }
         public List<String> responseCodes() { return responseCodes; }
         public Map<String, String> jpToSSMapper() { return jpToSSMapper; }
         public Map<String, String> jpToOutcomeMapper() { return jpToOutcomeMapper; }
+    }
+
+    /** A request with a body to a path on the raw server. */
+    private static TestConfig retryConfig(String path, RESTNodeV2.RequestMode method, boolean retryPostAndPatch) {
+        TestConfig config = new TestConfig();
+        config.restURL = rawServer.url(path);
+        config.requestMode = method;
+        config.payload = "{\"a\":1}";
+        config.retryPostAndPatch = retryPostAndPatch;
+        return config;
     }
 
     /** Both JSON handlers configured, with a status code outcome to fall back to. */
@@ -545,13 +618,15 @@ class HttpClientReuseTest {
     }
 
     /**
-     * Minimal HTTP/1.1 server for connection-level behaviour HttpServer cannot produce. {@code /stale} answers the
-     * first request on a connection and closes the connection, unanswered, on the next one. {@code /stall} sends the
-     * response headers and part of the body, then sends nothing more until the client goes away.
+     * Minimal HTTP/1.1 server for connection-level behaviour HttpServer cannot produce. It counts the requests it reads
+     * in full, by path. {@code /stale/...} answers the first request on a connection and closes the connection,
+     * unanswered, on the next one. {@code /lost-reply/...} closes the connection without answering the first request
+     * to its path, and answers later ones. {@code /stall} sends the response headers and part of the body, then sends
+     * nothing more until the client goes away.
      */
     private static final class RawServer implements AutoCloseable {
 
-        final AtomicInteger staleRequests = new AtomicInteger();
+        private final Map<String, AtomicInteger> requests = new ConcurrentHashMap<>();
         private final ServerSocket socket;
 
         RawServer() throws IOException {
@@ -563,6 +638,11 @@ class HttpClientReuseTest {
 
         String url(String path) {
             return "http://127.0.0.1:" + socket.getLocalPort() + path;
+        }
+
+        int requests(String path) {
+            AtomicInteger count = requests.get(path);
+            return count == null ? 0 : count.get();
         }
 
         private void accept() {
@@ -589,6 +669,7 @@ class HttpClientReuseTest {
                     }
                     in.readNBytes(contentLength(head));
                     String path = head.split(" ")[1];
+                    int count = requests.computeIfAbsent(path, p -> new AtomicInteger()).incrementAndGet();
                     if (path.equals("/stall")) {
                         out.write("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"partial\":".getBytes(StandardCharsets.US_ASCII));
                         out.flush();
@@ -597,11 +678,11 @@ class HttpClientReuseTest {
                         }
                         return;
                     }
-                    if (path.equals("/stale")) {
-                        staleRequests.incrementAndGet();
-                        if (served > 0) {
-                            return;
-                        }
+                    if (path.startsWith("/stale/") && served > 0) {
+                        return; // as if the server's idle timeout had just closed the pooled connection
+                    }
+                    if (path.startsWith("/lost-reply/") && count == 1) {
+                        return; // as if the server processed the request and the reply was lost
                     }
                     out.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".getBytes(StandardCharsets.US_ASCII));
                     out.flush();

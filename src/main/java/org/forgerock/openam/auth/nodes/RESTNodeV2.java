@@ -110,7 +110,8 @@ public class RESTNodeV2 implements Node {
 
     private static final ClientCache CLIENT_CACHE = new ClientCache(MAX_CACHED_CLIENTS);
 
-    // The JDK's message when a connection closes before any byte of the response arrives (same on JDK 17 to 26)
+    // The JDK's message when a connection closes before any byte of the response arrives (same on JDK 17 to 26). It is
+    // the same whether the connection was pooled or new, and whether or not the server had read the request.
     private static final String NO_RESPONSE_BYTES = "header parser received no bytes";
 
     public enum RequestMode {
@@ -175,6 +176,9 @@ public class RESTNodeV2 implements Node {
 
         @Attribute(order = 1000)
         default int timeout() { return 30; }
+
+        @Attribute(order = 1050)
+        default boolean retryPostAndPatch() { return false; }
 
         @Attribute(order = 1100)
         List<String> responseCodes();
@@ -753,7 +757,7 @@ public class RESTNodeV2 implements Node {
         try {
             response = send(httpClient, request, deadline);
         } catch (IOException e) {
-            if (!closedBeforeResponse(requestMode, e)) {
+            if (!shouldRetry(requestMode, config.retryPostAndPatch(), e, deadline)) {
                 throw e;
             }
             logger.debug(loggerPrefix + "Connection closed before a response, retrying once: " + e);
@@ -797,14 +801,36 @@ public class RESTNodeV2 implements Node {
     }
 
     /**
-     * True when the connection closed before any byte of the response arrived. On a pooled keep-alive connection that
-     * almost always means the server had already closed it as idle and never read the request. The JDK retries this
-     * itself, on another connection, but only for GET and HEAD.
+     * Whether to send a failed request once more. Only one failure qualifies: the connection closed before any byte of
+     * the response arrived. Usually the server had closed a pooled keep-alive connection as idle and never read the
+     * request, but the JDK reports a server that read the request, acted on it and closed the connection without
+     * answering in exactly the same way, so the request may already have taken effect. It is sent again only where that
+     * is safe: PUT and DELETE are idempotent, and POST and PATCH are repeated only when Retry POST and PATCH is enabled.
+     * GET and HEAD are left to the JDK, which retries them itself when a pooled connection closes. Once the timeout has
+     * passed, a retry could only time out, possibly after delivering the request again, so the failure stands.
      */
-    private static boolean closedBeforeResponse(RequestMode requestMode, IOException e) {
-        if (requestMode == RequestMode.GET || requestMode == RequestMode.HEAD) {
-            return false;
+    static boolean shouldRetry(RequestMode requestMode, boolean retryPostAndPatch, IOException failure, long deadline) {
+        boolean safeToRepeat;
+        switch (requestMode) {
+            case PUT:
+            case DELETE:
+                safeToRepeat = true;
+                break;
+            case POST:
+            case PATCH:
+                safeToRepeat = retryPostAndPatch;
+                break;
+            default:
+                safeToRepeat = false;
+                break;
         }
+        return safeToRepeat && deadline - System.nanoTime() > 0 && closedBeforeResponse(failure);
+    }
+
+    /**
+     * True when the connection closed before any byte of the response arrived.
+     */
+    private static boolean closedBeforeResponse(IOException e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t.getMessage() != null && t.getMessage().contains(NO_RESPONSE_BYTES)) {
                 return true;
@@ -818,9 +844,10 @@ public class RESTNodeV2 implements Node {
     }
 
     /**
-     * AM leaves a setting with no stored value out of a node's configuration, and a version 1 node from a build without
-     * Send Body with DELETE has no such setting at all. After an update the journey editor reports every setting
-     * missing from the upgraded configuration as a missing required value, so each one is filled in with its default.
+     * AM leaves a setting with no stored value out of a node's configuration. Version 1 nodes have no Retry POST and
+     * PATCH setting at all, and those from a build without Send Body with DELETE have no such setting either. After an
+     * update the journey editor reports every setting missing from the upgraded configuration as a missing required
+     * value, so each one is filled in with its default.
      */
     @NodeVersionUpgrader.UpgraderMetadata(version = 2, previousUpgrader = NoUpgrades.class)
     public static class RESTNodeV2Upgrader implements NodeVersionUpgrader {
@@ -853,6 +880,7 @@ public class RESTNodeV2 implements Node {
             putIfMissing(config, "privateKey", DEFAULTS.privateKey());
             putIfMissing(config, "disableCertChecks", DEFAULTS.disableCertChecks());
             putIfMissing(config, "timeout", DEFAULTS.timeout());
+            putIfMissing(config, "retryPostAndPatch", DEFAULTS.retryPostAndPatch());
             putIfMissing(config, "responseCodes", new ArrayList<>(DEFAULTS.responseCodes()));
             putIfMissing(config, "statusCodeReturn", DEFAULTS.statusCodeReturn());
             putIfMissing(config, "bodyReturn", DEFAULTS.bodyReturn());
