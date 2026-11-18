@@ -12,12 +12,12 @@ package org.forgerock.openam.auth.nodes;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.Key;
 import java.security.KeyFactory;
@@ -41,6 +41,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -64,6 +69,9 @@ import org.forgerock.openam.auth.node.api.NodeProcessException;
 import org.forgerock.openam.auth.node.api.NodeState;
 import org.forgerock.openam.auth.node.api.OutcomeProvider;
 import org.forgerock.openam.auth.node.api.TreeContext;
+import org.forgerock.openam.auth.node.api.upgrade.NoUpgrades;
+import org.forgerock.openam.auth.node.api.upgrade.NodeVersionUpgrader;
+import org.forgerock.openam.auth.node.api.upgrade.exception.InvalidUpgradeConfigException;
 import org.forgerock.util.i18n.PreferredLocales;
 import org.json.JSONObject;
 import org.slf4j.Logger;
@@ -71,7 +79,9 @@ import org.slf4j.LoggerFactory;
 
 import com.google.inject.assistedinject.Assisted;
 import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
 import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.JsonPathException;
 import com.jayway.jsonpath.Option;
 import com.jayway.jsonpath.PathNotFoundException;
 import com.sun.identity.sm.RequiredValueValidator;
@@ -80,7 +90,7 @@ import com.sun.identity.sm.RequiredValueValidator;
         configClass = RESTNodeV2.Config.class,
         tags            = {"marketplace", "trustnetwork"}
 )
-@Node.VersionMetadata(name = "RESTNode", version = 2)
+@Node.VersionMetadata(name = "RESTNode", version = 2, upgrader = RESTNodeV2.RESTNodeV2Upgrader.class)
 public class RESTNodeV2 implements Node {
 
     private static final Logger logger = LoggerFactory.getLogger(RESTNodeV2.class);
@@ -95,24 +105,13 @@ public class RESTNodeV2 implements Node {
     // AM builds a new node instance for every evaluation (AuthTreeExecutor -> AuthNodeFactory.createNode),
     // so an HttpClient held in an instance field would still be rebuilt on every request. Clients are
     // cached per class instead, keyed by everything that shapes a client (mTLS material, trust mode,
-    // connect timeout), and shared by every RESTNodeV2 with the same settings. The cache is a bounded
-    // LRU guarded by its own monitor; evicted clients are shut down.
+    // connect timeout), and shared by every RESTNodeV2 with the same settings.
     static final int MAX_CACHED_CLIENTS = 32;
 
-    // HttpClient.shutdown() exists from JDK 21 (the AIC runtime). Looked up reflectively so the node
-    // still runs on JDK 17, where an evicted client is left to the garbage collector instead.
-    private static final Method HTTP_CLIENT_SHUTDOWN = findShutdownMethod();
+    private static final ClientCache CLIENT_CACHE = new ClientCache(MAX_CACHED_CLIENTS);
 
-    private static final Map<String, HttpClient> CLIENT_CACHE = new LinkedHashMap<String, HttpClient>(16, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, HttpClient> eldest) {
-            if (size() > MAX_CACHED_CLIENTS) {
-                shutdownQuietly(eldest.getValue());
-                return true;
-            }
-            return false;
-        }
-    };
+    // The JDK's message when a connection closes before any byte of the response arrives (same on JDK 17 to 26)
+    private static final String NO_RESPONSE_BYTES = "header parser received no bytes";
 
     public enum RequestMode {
         GET, POST, PUT, DELETE, PATCH, HEAD
@@ -229,10 +228,14 @@ public class RESTNodeV2 implements Node {
             } else {
                 if ((config.statusCodeReturn() != null) && (config.statusCodeReturn() != "")) context.getStateFor(this).putShared(config.statusCodeReturn(),response.statusCode());
                 if ((config.bodyReturn() != null) && (config.bodyReturn() != "")) context.getStateFor(this).putShared(config.bodyReturn(),response.body());
-                processResponse(context, response.body().toString());
+
+                // Parsed once, for both JSON handlers, and only when one is configured
+                Object document = config.jpToSSMapper().isEmpty() && config.jpToOutcomeMapper().isEmpty()
+                        ? null : parseJson(response.body());
+                processResponse(context, document);
 
                 // Choose dynamic outcome if provided in config, e.g., response code 200, 401, etc
-                String outcome = calculateOutcome(config.responseCodes(), response.statusCode(), context, response.body().toString());
+                String outcome = calculateOutcome(config.responseCodes(), response.statusCode(), context, document);
 
                 return Action.goTo(outcome).build();
             }
@@ -241,10 +244,13 @@ public class RESTNodeV2 implements Node {
             if (ex instanceof IOException) {
                 // Network failures (connect/request timeouts, refused or reset connections, TLS handshake
                 // failures) are expected under load or during an outage: log one line and keep the stack
-                // trace at DEBUG so a failure surge cannot stall the stdout pipe (TRIAGE-38713).
+                // trace at DEBUG so a failure surge cannot stall the stdout pipe.
                 logger.warn(loggerPrefix + "Request to " + describeTarget(url) + " failed: " + ex);
                 logger.debug(loggerPrefix + "Request failure stack trace", ex);
             } else {
+                if (ex instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
                 logger.error(loggerPrefix + "Exception occurred", ex);
             }
             NodeState nodeState = context.getStateFor(this);
@@ -262,22 +268,11 @@ public class RESTNodeV2 implements Node {
      * hydrated from sharedState is part of the cache key, so per-request certs are reused while they repeat.
      */
     private HttpClient getHttpClient(TreeContext context) throws Exception {
-        String publicCert = null;
-        String privateKey = null;
-        if (config.usemTLS()) {
-            publicCert = hydrate(context, config.publicCert());
-            privateKey = hydrate(context, config.privateKey());
-        }
-        String key = clientCacheKey(config.usemTLS(), publicCert, privateKey, config.disableCertChecks(), config.timeout());
-        synchronized (CLIENT_CACHE) {
-            HttpClient client = CLIENT_CACHE.get(key);
-            if (client == null) {
-                // Built under the lock so a burst of first requests creates one client, not one each
-                client = getmTLShttpClient(publicCert, privateKey);
-                CLIENT_CACHE.put(key, client);
-            }
-            return client;
-        }
+        boolean usemTLS = config.usemTLS();
+        String publicCert = usemTLS ? hydrate(context, config.publicCert()) : null;
+        String privateKey = usemTLS ? hydrate(context, config.privateKey()) : null;
+        String key = clientCacheKey(usemTLS, publicCert, privateKey, config.disableCertChecks(), config.timeout());
+        return CLIENT_CACHE.get(key, () -> getmTLShttpClient(publicCert, privateKey));
     }
 
     /**
@@ -303,38 +298,78 @@ public class RESTNodeV2 implements Node {
         return key.toString();
     }
 
-    private static Method findShutdownMethod() {
-        try {
-            return HttpClient.class.getMethod("shutdown");
-        } catch (NoSuchMethodException e) {
-            return null; // JDK 17
-        }
-    }
-
-    /**
-     * Orderly, non-blocking shutdown: requests already in flight on the client run to completion.
-     */
-    private static void shutdownQuietly(HttpClient client) {
-        if (HTTP_CLIENT_SHUTDOWN == null) {
-            return;
-        }
-        try {
-            HTTP_CLIENT_SHUTDOWN.invoke(client);
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            logger.debug(loggerPrefix + "Failed to shut down evicted HttpClient", e);
-        }
-    }
-
     static int cachedClientCount() {
-        synchronized (CLIENT_CACHE) {
-            return CLIENT_CACHE.size();
-        }
+        return CLIENT_CACHE.size();
     }
 
     static void clearClientCache() {
-        synchronized (CLIENT_CACHE) {
-            CLIENT_CACHE.values().forEach(RESTNodeV2::shutdownQuietly);
-            CLIENT_CACHE.clear();
+        CLIENT_CACHE.clear();
+    }
+
+    /**
+     * Bounded LRU of shared clients. A client is built outside the cache lock, so parsing mTLS material and creating
+     * an SSLContext for one key never holds up requests for other keys, while concurrent first requests for the same
+     * key wait for a single build. Evicted clients are not shut down: another thread may have fetched one and not yet
+     * sent on it, and a shut-down client rejects new requests. The garbage collector reclaims them once unused.
+     */
+    static final class ClientCache {
+
+        private final Map<String, CompletableFuture<HttpClient>> clients;
+
+        ClientCache(int maxSize) {
+            clients = new LinkedHashMap<String, CompletableFuture<HttpClient>>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CompletableFuture<HttpClient>> eldest) {
+                    return size() > maxSize;
+                }
+            };
+        }
+
+        HttpClient get(String key, Callable<HttpClient> factory) throws Exception {
+            CompletableFuture<HttpClient> client;
+            boolean build;
+            synchronized (clients) {
+                client = clients.get(key);
+                build = client == null;
+                if (build) {
+                    client = new CompletableFuture<>();
+                    clients.put(key, client);
+                }
+            }
+            if (build) {
+                try {
+                    client.complete(factory.call());
+                } catch (Exception | Error e) {
+                    // Not cached, so the next request with these settings tries again
+                    synchronized (clients) {
+                        clients.remove(key, client);
+                    }
+                    client.completeExceptionally(e);
+                    throw e;
+                }
+            }
+            try {
+                return client.get();
+            } catch (ExecutionException e) {
+                // Another request's build for this key failed: fail with the same cause
+                Throwable cause = e.getCause();
+                if (cause instanceof Exception) {
+                    throw (Exception) cause;
+                }
+                throw (Error) cause;
+            }
+        }
+
+        int size() {
+            synchronized (clients) {
+                return clients.size();
+            }
+        }
+
+        void clear() {
+            synchronized (clients) {
+                clients.clear();
+            }
         }
     }
 
@@ -356,11 +391,16 @@ public class RESTNodeV2 implements Node {
 
     //TODO JK - any reason not to throw the exception thrown in this method, instead of catching it and logging it here
     
-    private void processResponse(TreeContext context, String responseBody) {
+    private void processResponse(TreeContext context, Object document) {
         NodeState nodeState = context.getStateFor(this);
         Set<String> keys = config.jpToSSMapper().keySet();
 
-        Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
+        if (document == null) {
+            if (!keys.isEmpty()) {
+                logger.debug(loggerPrefix + "Response body is not JSON, skipping the JSON Response Handler");
+            }
+            return;
+        }
 
         for (Iterator<String> i = keys.iterator(); i.hasNext();) {
             String toSS = i.next();
@@ -375,18 +415,29 @@ public class RESTNodeV2 implements Node {
                 } else {
                     nodeState.putShared(toSS, val);
                 }
-            } catch (PathNotFoundException e) {
+            } catch (InvalidPathException e) { // includes PathNotFoundException
                 logger.error(loggerPrefix + " " + e);
             }
         }
     }
 
-
+    /**
+     * The response body as a JSON object or array, or null for anything else, such as an empty body or a gateway's
+     * HTML error page. The JSON handlers do not apply to those.
+     */
+    private static Object parseJson(String responseBody) {
+        try {
+            Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
+            return (document instanceof Map || document instanceof List) ? document : null;
+        } catch (JsonPathException | IllegalArgumentException e) {
+            return null;
+        }
+    }
 
     /**
      * Try to match response code to user configured outcomes. Supports wildcards such as 2xx, 3xx, etc.
      */
-    private String calculateOutcome(List<String>outcomes, int statusCode, TreeContext context, String responseBody)
+    private String calculateOutcome(List<String>outcomes, int statusCode, TreeContext context, Object document)
     {
         String result = null;
         String statusCodeStr = Integer.toString(statusCode);
@@ -400,19 +451,22 @@ public class RESTNodeV2 implements Node {
         }
 
         // Calculate outcomes based on JSONpath filters. If any filter matches, the corresponding outcome is used.
-        // This superceeds any previous matching statusCode outcome
+        // This superceeds any previous matching statusCode outcome. A body that is not JSON, or a filter that
+        // cannot be applied to it, matches nothing, so an error page still reaches its status code outcome.
 
-        Set<String> keys = config.jpToOutcomeMapper().keySet();
-
-        Object document = Configuration.defaultConfiguration().addOptions(Option.SUPPRESS_EXCEPTIONS).jsonProvider().parse(responseBody);
+        Set<String> keys = document == null ? Collections.emptySet() : config.jpToOutcomeMapper().keySet();
 
         for (Iterator<String> i = keys.iterator(); i.hasNext();) {
             String toSS = i.next();
             String thisJPath = config.jpToOutcomeMapper().get(toSS);
-            List<String> vals = JsonPath.read(document, thisJPath);
-            if (vals.size() > 0) {
-                result = toSS;
-                break;  // Exit at first matching outcome
+            try {
+                List<String> vals = JsonPath.read(document, thisJPath);
+                if (vals.size() > 0) {
+                    result = toSS;
+                    break;  // Exit at first matching outcome
+                }
+            } catch (InvalidPathException e) { // includes PathNotFoundException
+                logger.debug(loggerPrefix + "JSON outcome " + toSS + " did not match: " + e.getMessage());
             }
         }
 
@@ -683,8 +737,18 @@ public class RESTNodeV2 implements Node {
         }
 
 
-        // Send request
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        // Send request. The timeout covers the whole call, including a retry and reading the response body.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
+        HttpResponse<String> response;
+        try {
+            response = send(httpClient, request, deadline);
+        } catch (IOException e) {
+            if (!closedBeforeResponse(requestMode, e)) {
+                throw e;
+            }
+            logger.debug(loggerPrefix + "Connection closed before a response, retrying once: " + e);
+            response = send(httpClient, request, deadline);
+        }
         logger.debug(loggerPrefix + "HttpRequest response: " + response.statusCode());
         logger.debug(loggerPrefix + "HttpRequest response: " + response.body());
 
@@ -692,8 +756,107 @@ public class RESTNodeV2 implements Node {
 
 	}
 
+    /**
+     * Send and read the whole response before the deadline. The request timeout alone stops counting once the
+     * response headers arrive, so a server that sends headers and then stalls would hold the thread indefinitely.
+     */
+    private static HttpResponse<String> send(HttpClient httpClient, HttpRequest request, long deadline)
+            throws IOException, InterruptedException {
+        CompletableFuture<HttpResponse<String>> response = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            return response.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException e) {
+            response.cancel(true); // aborts the exchange and closes its connection
+            throw new HttpTimeoutException("request timed out");
+        } catch (InterruptedException e) {
+            response.cancel(true);
+            throw e;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw new IOException(cause);
+        }
+    }
+
+    /**
+     * True when the connection closed before any byte of the response arrived. On a pooled keep-alive connection that
+     * almost always means the server had already closed it as idle and never read the request. The JDK retries this
+     * itself, on another connection, but only for GET and HEAD.
+     */
+    private static boolean closedBeforeResponse(RequestMode requestMode, IOException e) {
+        if (requestMode == RequestMode.GET || requestMode == RequestMode.HEAD) {
+            return false;
+        }
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t.getMessage() != null && t.getMessage().contains(NO_RESPONSE_BYTES)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean isCredentialHeader(String name) {
         return "authorization".equalsIgnoreCase(name) || "proxy-authorization".equalsIgnoreCase(name);
+    }
+
+    /**
+     * Version 2 has the same settings as version 1, but AM leaves a setting with no stored value out of a node's
+     * configuration, and after an update the journey editor reports every setting missing from the upgraded
+     * configuration as a missing required value. Each missing setting is filled in with its default.
+     */
+    @NodeVersionUpgrader.UpgraderMetadata(version = 2, previousUpgrader = NoUpgrades.class)
+    public static class RESTNodeV2Upgrader implements NodeVersionUpgrader {
+
+        private static final Config DEFAULTS = new Config() {
+            @Override
+            public List<String> responseCodes() { return Collections.emptyList(); }
+            @Override
+            public Map<String, String> jpToSSMapper() { return Collections.emptyMap(); }
+            @Override
+            public Map<String, String> jpToOutcomeMapper() { return Collections.emptyMap(); }
+        };
+
+        @Override
+        public JsonValue upgrade(JsonValue config) throws InvalidUpgradeConfigException {
+            if (!config.isMap()) {
+                throw new InvalidUpgradeConfigException();
+            }
+            putIfMissing(config, "restURL", DEFAULTS.restURL());
+            putIfMissing(config, "requestMode", DEFAULTS.requestMode().name());
+            putIfMissing(config, "queryParamsMap", new LinkedHashMap<>(DEFAULTS.queryParamsMap()));
+            putIfMissing(config, "headersMap", new LinkedHashMap<>(DEFAULTS.headersMap()));
+            putIfMissing(config, "basicAuthn", DEFAULTS.basicAuthn());
+            putIfMissing(config, "basicAuthnUsername", DEFAULTS.basicAuthnUsername());
+            putIfMissing(config, "basicAuthnPassword", DEFAULTS.basicAuthnPassword());
+            putIfMissing(config, "payload", DEFAULTS.payload());
+            putIfMissing(config, "bodyType", DEFAULTS.bodyType().name());
+            putIfMissing(config, "usemTLS", DEFAULTS.usemTLS());
+            putIfMissing(config, "publicCert", DEFAULTS.publicCert());
+            putIfMissing(config, "privateKey", DEFAULTS.privateKey());
+            putIfMissing(config, "disableCertChecks", DEFAULTS.disableCertChecks());
+            putIfMissing(config, "timeout", DEFAULTS.timeout());
+            putIfMissing(config, "responseCodes", new ArrayList<>(DEFAULTS.responseCodes()));
+            putIfMissing(config, "statusCodeReturn", DEFAULTS.statusCodeReturn());
+            putIfMissing(config, "bodyReturn", DEFAULTS.bodyReturn());
+            putIfMissing(config, "jpToSSMapper", new LinkedHashMap<>(DEFAULTS.jpToSSMapper()));
+            putIfMissing(config, "jpToOutcomeMapper", new LinkedHashMap<>(DEFAULTS.jpToOutcomeMapper()));
+            putIfMissing(config, "logRequest", DEFAULTS.logRequest());
+            return config;
+        }
+
+        private static void putIfMissing(JsonValue config, String setting, Object defaultValue) {
+            if (config.get(setting).isNull()) {
+                config.put(setting, defaultValue);
+            }
+        }
     }
 
     /**
