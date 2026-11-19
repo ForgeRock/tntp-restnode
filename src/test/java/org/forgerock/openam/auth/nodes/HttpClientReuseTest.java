@@ -286,6 +286,21 @@ class HttpClientReuseTest {
     }
 
     /**
+     * Sending a body with GET keeps the JDK's own retry of a GET whose pooled connection closed before a response.
+     */
+    @Test
+    void v2RetriesAGetWithABodyOnAClosedPooledConnection() throws Exception {
+        String path = "/stale/GET-with-body";
+        TestConfig config = retryConfig(path, RESTNodeV2.RequestMode.GET, false);
+        config.getRequestBody = true;
+
+        assertEquals("2xx", new RESTNodeV2(config).process(context()).outcome); // leaves a pooled connection
+        assertEquals("2xx", new RESTNodeV2(config).process(context()).outcome);
+
+        assertEquals(3, rawServer.requests(path), "requests the server received");
+    }
+
+    /**
      * The server reads the request on a new connection and closes it without answering, as if it processed the
      * request and the reply was lost. The JDK reports this exactly as it reports a pooled connection closed as idle,
      * so sending the request again can deliver it twice: only PUT and DELETE are sent again unless the node allows it.
@@ -428,6 +443,60 @@ class HttpClientReuseTest {
     }
 
     @Test
+    void v2SendsBodyWithGetOnlyWhenEnabled() throws Exception {
+        TestConfig get = new TestConfig();
+        get.restURL = baseUrl + "/record";
+        get.requestMode = RESTNodeV2.RequestMode.GET;
+        get.payload = "{\"status\":\"active\"}";
+        get.logRequest = true;
+
+        TreeContext withoutBody = context();
+        assertEquals("2xx", new RESTNodeV2(get).process(withoutBody).outcome);
+        assertEquals("GET", recordedMethod.get());
+        assertEquals("", recordedBody.get());
+        assertFalse(withoutBody.sharedState.get("cURL").asString().contains("--data"));
+
+        get.getRequestBody = true;
+        TreeContext withBody = context();
+        assertEquals("2xx", new RESTNodeV2(get).process(withBody).outcome);
+        assertEquals("GET", recordedMethod.get());
+        assertEquals("{\"status\":\"active\"}", recordedBody.get());
+        assertTrue(withBody.sharedState.get("cURL").asString().contains("--data '{\"status\":\"active\"}'"));
+
+        // Enabled with no body content: a plain GET
+        get.payload = "";
+        assertEquals("2xx", new RESTNodeV2(get).process(context()).outcome);
+        assertEquals("", recordedBody.get());
+    }
+
+    @Test
+    void v2SendBodySettingsApplyOnlyToTheirOwnMethod() throws Exception {
+        TestConfig config = new TestConfig();
+        config.restURL = baseUrl + "/record";
+        config.payload = "{\"id\":42}";
+        config.logRequest = true;
+
+        // Send Body with DELETE leaves a GET without a body, in the request and in its cURL copy
+        config.requestMode = RESTNodeV2.RequestMode.GET;
+        config.deleteRequestBody = true;
+        TreeContext get = context();
+        assertEquals("2xx", new RESTNodeV2(config).process(get).outcome);
+        assertEquals("GET", recordedMethod.get());
+        assertEquals("", recordedBody.get());
+        assertFalse(get.sharedState.get("cURL").asString().contains("--data"));
+
+        // Send Body with GET leaves a DELETE without a body
+        config.requestMode = RESTNodeV2.RequestMode.DELETE;
+        config.deleteRequestBody = false;
+        config.getRequestBody = true;
+        TreeContext delete = context();
+        assertEquals("2xx", new RESTNodeV2(config).process(delete).outcome);
+        assertEquals("DELETE", recordedMethod.get());
+        assertEquals("", recordedBody.get());
+        assertFalse(delete.sharedState.get("cURL").asString().contains("--data"));
+    }
+
+    @Test
     void upgraderIsDeclaredForVersion2() {
         assertEquals(RESTNodeV2.RESTNodeV2Upgrader.class, RESTNodeV2.class.getAnnotation(Node.VersionMetadata.class).upgrader());
 
@@ -465,6 +534,7 @@ class HttpClientReuseTest {
         assertEquals(Map.of(), v2.get("jpToOutcomeMapper").asMap());
         assertFalse(v2.get("logRequest").asBoolean());
         assertFalse(v2.get("deleteRequestBody").asBoolean());
+        assertFalse(v2.get("getRequestBody").asBoolean());
         assertFalse(v2.get("retryPostAndPatch").asBoolean(), "version 1 never sent a request twice");
     }
 
@@ -512,6 +582,7 @@ class HttpClientReuseTest {
         boolean basicAuthn;
         boolean logRequest;
         boolean deleteRequestBody;
+        boolean getRequestBody;
         boolean retryPostAndPatch;
         List<String> responseCodes = List.of("2xx");
         Map<String, String> jpToSSMapper = Map.of();
@@ -530,6 +601,7 @@ class HttpClientReuseTest {
         public String basicAuthnPassword() { return "s3cret"; }
         public boolean logRequest() { return logRequest; }
         public boolean deleteRequestBody() { return deleteRequestBody; }
+        public boolean getRequestBody() { return getRequestBody; }
         public boolean retryPostAndPatch() { return retryPostAndPatch; }
         public List<String> responseCodes() { return responseCodes; }
         public Map<String, String> jpToSSMapper() { return jpToSSMapper; }
